@@ -256,6 +256,43 @@ class TestPipeline:
         result = ar.pipeline(frame, [])
         assert result.shape == frame.shape
 
+    def test_pipeline_dry_run_returns_original_frame(self, sample_csv):
+        frame = ar.read_csv(sample_csv)
+
+        result = ar.pipeline(
+            frame,
+            [
+                ("strip_whitespace",),
+            ],
+            dry_run=True,
+        )
+
+        assert result is frame
+
+    def test_pipeline_dry_run_validates_unknown_steps(self, sample_csv):
+        frame = ar.read_csv(sample_csv)
+
+        with pytest.raises(ar.UnknownStepError):
+            ar.pipeline(
+                frame,
+                [
+                    ("missing_step",),
+                ],
+                dry_run=True,
+            )
+
+    def test_pipeline_dry_run_validates_invalid_kwargs(self, sample_csv):
+        frame = ar.read_csv(sample_csv)
+
+        with pytest.raises(ValueError, match="Expected a dict"):
+            ar.pipeline(
+                frame,
+                [
+                    ("drop_nulls", "subset=name"),
+                ],
+                dry_run=True,
+            )
+
     def test_pipeline_return_metadata_disabled_by_default(self, sample_csv):
         frame = ar.read_csv(sample_csv)
 

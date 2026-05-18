@@ -102,6 +102,7 @@ def pipeline(
     steps: list[tuple],
     *,
     return_metadata: bool = False,
+    dry_run: bool = False,
 ) -> ArFrame | tuple[ArFrame, dict[str, Any]]:
     """Apply a list of cleaning steps sequentially.
 
@@ -168,6 +169,10 @@ def pipeline(
         if name in _STEP_REGISTRY:
             # C++ backed step - fast path
             fn = _STEP_REGISTRY[name]
+
+            if dry_run:
+                continue
+
             started_at = perf_counter()
             if name in {"rename_columns", "cast_types"} and "mapping" not in kwargs:
                 result = fn(result, kwargs)
@@ -182,8 +187,13 @@ def pipeline(
                 )
         elif name in python_step_registry:
             # Pure Python step - slower but contributor-friendly
+
+            if dry_run:
+                continue
+
             started_at = perf_counter()
             fn = python_step_registry[name]
+
             df = to_pandas(result)
 
             # Isolate genuine custom steps from internal core library functions
