@@ -135,24 +135,33 @@ class DataQualityReport:
             lines.append("## Columns")
             lines.append("")
 
-            lines.append("| Name | Dtype | Semantic Type | Nulls | Unique | Warnings |")
-        lines.append("|---|---|---|---|---|---|")
-
-        for name in sorted(self.columns):
-            column = self.columns[name]
-
-            warnings = ", ".join(column.warnings) if column.warnings else "-"
-
             lines.append(
-                f"| {column.name} "
-                f"| {column.dtype} "
-                f"| {column.semantic_type} "
-                f"| {column.null_count} "
-                f"| {column.unique_count} "
-                f"| {warnings} |"
+                "| Name | Dtype | Semantic Type | Nulls | Unique | Warnings |"
             )
 
-        lines.append("")
+            lines.append(
+                "|---|---|---|---|---|---|"
+            )
+
+            for name in sorted(self.columns):
+                column = self.columns[name]
+
+                warnings = (
+                    ", ".join(column.warnings)
+                    if column.warnings
+                    else "-"
+                )
+
+                lines.append(
+                    f"| {column.name} "
+                    f"| {column.semantic_type} "
+                    f"| {column.dtype} "
+                    f"| {column.null_count} "
+                    f"| {column.unique_count} "
+                    f"| {warnings} |"
+                )
+
+            lines.append("")
 
         # Suggestions
         if self.suggestions:

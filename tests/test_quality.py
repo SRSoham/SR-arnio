@@ -424,3 +424,5 @@ def test_report_to_markdown_empty_sections():
 
     assert "# Data Quality Report" in md
     assert "## Overview" in md
+    assert "## Columns" not in md
+    assert "|---|---|" not in md
