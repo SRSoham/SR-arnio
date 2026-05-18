@@ -398,6 +398,25 @@ class TestPipeline:
         except ValueError as e:
             assert "Expected a dict" in str(e)
 
+    def test_custom_step_exception_wrapping_and_chaining(self):
+        """Verify that exceptions thrown by custom Python steps are wrapped with context."""
+
+        def failing_step(df, **kwargs):
+            raise RuntimeError("Internal step crash")
+
+        ar.register_step("error_prone_step", failing_step)
+
+        import pandas as pd
+
+        frame = ar.from_pandas(pd.DataFrame({"dummy": [1, 2, 3]}))
+
+        with pytest.raises(ar.PipelineStepError) as exc_info:
+            ar.pipeline(frame, [("error_prone_step",)])
+
+        assert "error_prone_step" in str(exc_info.value)
+        assert "Internal step crash" in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, RuntimeError)
+
     def test_pipeline_rejects_invalid_step_format(self, sample_csv):
         frame = ar.read_csv(sample_csv)
 
