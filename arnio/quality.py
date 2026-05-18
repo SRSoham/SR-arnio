@@ -146,8 +146,8 @@ class DataQualityReport:
 
                 lines.append(
                     f"| {column.name} "
-                    f"| {column.semantic_type} "
                     f"| {column.dtype} "
+                    f"| {column.semantic_type} "
                     f"| {column.null_count} "
                     f"| {column.unique_count} "
                     f"| {warnings} |"

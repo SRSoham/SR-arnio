@@ -397,6 +397,7 @@ def test_report_to_markdown_basic(tmp_path):
     assert "# Data Quality Report" in md
     assert "## Overview" in md
     assert "## Columns" in md
+    assert "| id | int64 | identifier |" in md
 
 
 def test_report_to_markdown_deterministic(tmp_path):
