@@ -292,6 +292,13 @@ class TestPipeline:
                 ],
                 dry_run=True,
             )
+            
+    
+        
+
+
+
+
 
     def test_pipeline_return_metadata_disabled_by_default(self, sample_csv):
         frame = ar.read_csv(sample_csv)

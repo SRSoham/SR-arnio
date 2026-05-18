@@ -117,6 +117,9 @@ def pipeline(
     steps : list[tuple]
         List of steps to apply. Each step is (name,) or (name, kwargs).
     return_metadata : bool, default False
+    dry_run : bool, default False
+    Validates pipeline structure and step execution without
+    returning transformed output.
         When True, also return a metadata dictionary with per-step timing
         information in execution order.
 
@@ -150,6 +153,7 @@ def pipeline(
     )
 
     result = frame
+    
     step_timings: list[dict[str, Any]] = []
     for step in steps:
         if len(step) == 1:
@@ -177,7 +181,14 @@ def pipeline(
             if name in {"rename_columns", "cast_types"} and "mapping" not in kwargs:
                 result = fn(result, kwargs)
             else:
-                result = fn(result, **kwargs)
+                target_frame = result
+
+                step_result = fn(target_frame, **kwargs)
+
+                if not dry_run:
+                    result = step_result
+
+
             if return_metadata:
                 step_timings.append(
                     {

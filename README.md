@@ -70,6 +70,21 @@ clean = ar.pipeline(frame, [
     ("drop_duplicates",),
 ])
 
+### Dry Run Validation
+
+Use `dry_run=True` to validate pipeline configuration and
+step execution without returning transformed output.
+
+```python
+ar.pipeline(
+    frame,
+    [
+        ("drop_nulls",),
+    ],
+    dry_run=True,
+)
+```
+
 # Out comes a standard pandas DataFrame — use it like you always have
 df = ar.to_pandas(clean)
 
