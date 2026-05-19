@@ -178,8 +178,12 @@ def pipeline(
                 continue
 
             started_at = perf_counter()
-            if name in {"rename_columns", "cast_types"} and "mapping" not in kwargs:
+            if name == "rename_columns" and "mapping" not in kwargs:
+                result = fn(result, mapping=kwargs)
+
+            elif name == "cast_types" and "mapping" not in kwargs:
                 result = fn(result, kwargs)
+
             else:
                 target_frame = result
 
