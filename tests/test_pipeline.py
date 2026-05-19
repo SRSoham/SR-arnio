@@ -76,6 +76,54 @@ class TestPipeline:
         )
         assert result.shape[0] == 3
 
+    def test_pipeline_dry_run_validates_builtin_step_arguments(self):
+        frame = ar.from_pandas(
+            pd.DataFrame(
+                {
+                    "name": ["Alice", None],
+                }
+            )
+        )
+
+        with pytest.raises(KeyError, match="missing"):
+            ar.pipeline(
+                frame,
+                [
+                    ("strip_whitespace", {"subset": ["missing"]}),
+                ],
+                dry_run=True,
+            )
+
+    def test_pipeline_dry_run_mapping_shorthand_does_not_mutate(self):
+        original = pd.DataFrame(
+            {
+                "transaction_id": ["t001", "t002"],
+            }
+        )
+        frame = ar.from_pandas(original)
+
+        result = ar.pipeline(
+            frame,
+            [
+                (
+                    "rename_columns",
+                    {
+                        "transaction_id": "TRANSACTION_ID",
+                    },
+                ),
+            ],
+            dry_run=True,
+        )
+
+        output = ar.to_pandas(result)                       
+
+        pd.testing.assert_frame_equal(
+            output,
+            original,
+            check_dtype=False,
+        )
+        pytest
+        
     def test_pipeline_drop_constant_columns(self):
         import pandas as pd
 
