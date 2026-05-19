@@ -174,9 +174,6 @@ def pipeline(
             # C++ backed step - fast path
             fn = _STEP_REGISTRY[name]
 
-            if dry_run:
-                continue
-
             started_at = perf_counter()
             if name == "rename_columns" and "mapping" not in kwargs:
                 result = fn(result, mapping=kwargs)
