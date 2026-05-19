@@ -198,11 +198,9 @@ def pipeline(
                 )
         elif name in python_step_registry:
             # Pure Python step - slower but contributor-friendly
-
-            if dry_run:
-                continue
-
             started_at = perf_counter()
+
+            
             fn = python_step_registry[name]
 
             df = to_pandas(result)
@@ -231,7 +229,10 @@ def pipeline(
                     f"{type(returned).__name__!r} instead of a pandas DataFrame. "
                     "Steps must return a pandas DataFrame."
                 )
-            result = from_pandas(returned)
+            step_result = from_pandas(returned)
+            if not dry_run:
+                result = step_result
+
             if return_metadata:
                 step_timings.append(
                     {
