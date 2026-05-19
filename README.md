@@ -70,6 +70,8 @@ clean = ar.pipeline(frame, [
     ("drop_duplicates",),
 ])
 
+```
+
 ### Dry Run Validation
 
 Use `dry_run=True` to validate pipeline configuration and
