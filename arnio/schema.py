@@ -803,7 +803,6 @@ def validate(
 
     if max_errors == 0:
         return ValidationResult(
-            passed=True,
             issues=[],
         )
 
@@ -823,7 +822,6 @@ def validate(
 
             if reached_limit():
                 return ValidationResult(
-                    passed=False,
                     issues=issues[:max_errors],
                 )
 
@@ -844,7 +842,6 @@ def validate(
 
         if reached_limit():
             return ValidationResult(
-                passed=False,
                 issues=issues[:max_errors],
             )
 
@@ -862,7 +859,6 @@ def validate(
 
                 if reached_limit():
                     return ValidationResult(
-                        passed=False,
                         issues=issues[:max_errors],
                     )
 
@@ -889,7 +885,6 @@ def validate(
             )
             if reached_limit():
                 return ValidationResult(
-                    passed=False,
                     issues=issues[:max_errors],
                 )
         else:
