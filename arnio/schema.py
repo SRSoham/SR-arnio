@@ -1605,7 +1605,6 @@ def _validate_datetime(
     field_def: Field,
 ) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
-    row_issues = []
     parsed = pd.to_datetime(non_null, format=field_def.format, errors="coerce")
 
     invalid_format = non_null[parsed.isna()]
