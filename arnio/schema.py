@@ -361,11 +361,10 @@ class Schema:
                     )
 
     def validate(
-            self,
-            frame: ArFrame,
-            max_errors: int | None = None,
+        self,
+        frame: ArFrame,
+        max_errors: int | None = None,
     ) -> ValidationResult:
-                
         """Validate a frame against this schema."""
         return validate(frame, self, max_errors=max_errors)
 
@@ -765,11 +764,10 @@ def diff_schema(
 
 
 def validate(
-        frame: ArFrame,
-        schema: Schema | dict[str, Field],
-        max_errors: int | None = None,
-) -> ValidationResult:        
-
+    frame: ArFrame,
+    schema: Schema | dict[str, Field],
+    max_errors: int | None = None,
+) -> ValidationResult:
     """Validate an ArFrame against a schema.
 
     Parameters
@@ -796,12 +794,21 @@ def validate(
     >>> result.passed
     """
     schema = schema if isinstance(schema, Schema) else Schema(schema)
+    if max_errors is not None and max_errors < 0:
+        raise ValueError("max_errors must be >= 0")
+
     df = to_pandas(frame)
     dtypes = frame.dtypes
     issues: list[ValidationIssue] = []
 
+    if max_errors == 0:
+        return ValidationResult(
+            passed=True,
+            issues=[],
+        )
+
     def reached_limit() -> bool:
-        return max_errors is not None and len(issues) >= max_errors    
+        return max_errors is not None and len(issues) >= max_errors
 
     for name, field_def in schema.fields.items():
         if name not in df.columns:
@@ -814,8 +821,11 @@ def validate(
                 )
             )
 
-            if name not in df.columns:
-                break
+            if reached_limit():
+                return ValidationResult(
+                    passed=False,
+                    issues=issues[:max_errors],
+                )
 
             continue
         column_issues = _validate_column(
@@ -833,7 +843,10 @@ def validate(
         issues.extend(column_issues)
 
         if reached_limit():
-            break        
+            return ValidationResult(
+                passed=False,
+                issues=issues[:max_errors],
+            )
 
     if schema.strict:
         expected = set(schema.fields)
@@ -846,6 +859,12 @@ def validate(
                         message=f"Unexpected column: {name}",
                     )
                 )
+
+                if reached_limit():
+                    return ValidationResult(
+                        passed=False,
+                        issues=issues[:max_errors],
+                    )
 
     if schema.unique is not None:
         if not isinstance(schema.unique, (list, tuple)):
@@ -868,6 +887,12 @@ def validate(
                     message="Composite unique columns cannot be empty",
                 )
             )
+
+            if reached_limit():
+                return ValidationResult(
+                    passed=False,
+                    issues=issues[:max_errors],
+                )
         else:
             missing_cols = [c for c in schema.unique if c not in df.columns]
             if missing_cols:

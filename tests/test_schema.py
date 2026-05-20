@@ -23,6 +23,7 @@ def test_schema_validation_passes_for_valid_frame(sample_csv):
     assert result.issue_count == 0
     assert result.bad_rows == []
 
+
 def test_schema_validation_stops_after_max_errors(tmp_path):
     path = tmp_path / "bad.csv"
 
@@ -45,10 +46,7 @@ def test_schema_validation_stops_after_max_errors(tmp_path):
     result = ar.validate(frame, schema, max_errors=2)
 
     assert result.issue_count == 2
-    assert len(result.issues) == 2            
-
-
-
+    assert len(result.issues) == 2
 
 
 def test_schema_rejects_invalid_field_values_string(sample_csv):
