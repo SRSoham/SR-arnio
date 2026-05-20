@@ -887,7 +887,6 @@ def validate(
                     message="Composite unique columns cannot be empty",
                 )
             )
-
             if reached_limit():
                 return ValidationResult(
                     passed=False,
