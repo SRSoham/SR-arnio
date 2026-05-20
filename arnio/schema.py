@@ -803,7 +803,10 @@ def validate(
 
     if max_errors == 0:
         return ValidationResult(
+            row_count=len(df),
+            issue_count=0,
             issues=[],
+            bad_rows=[],
         )
 
     def reached_limit() -> bool:
@@ -822,7 +825,10 @@ def validate(
 
             if reached_limit():
                 return ValidationResult(
+                    row_count=len(df),
+                    issue_count=len(issues[:max_errors]),
                     issues=issues[:max_errors],
+                    bad_rows=[],
                 )
 
             continue
@@ -842,7 +848,10 @@ def validate(
 
         if reached_limit():
             return ValidationResult(
+                row_count=len(df),
+                issue_count=len(issues[:max_errors]),
                 issues=issues[:max_errors],
+                bad_rows=[],
             )
 
     if schema.strict:
@@ -857,10 +866,12 @@ def validate(
                     )
                 )
 
-                if reached_limit():
-                    return ValidationResult(
-                        issues=issues[:max_errors],
-                    )
+                return ValidationResult(
+                    row_count=len(df),
+                    issue_count=len(issues[:max_errors]),
+                    issues=issues[:max_errors],
+                    bad_rows=[],
+                )
 
     if schema.unique is not None:
         if not isinstance(schema.unique, (list, tuple)):
@@ -885,8 +896,12 @@ def validate(
             )
             if reached_limit():
                 return ValidationResult(
+                    row_count=len(df),
+                    issue_count=len(issues[:max_errors]),
                     issues=issues[:max_errors],
+                    bad_rows=[],
                 )
+
         else:
             missing_cols = [c for c in schema.unique if c not in df.columns]
             if missing_cols:
