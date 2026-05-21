@@ -807,6 +807,56 @@ def test_identifier_numeric_cast_prevention():
     assert list(result["zip_code"]) == ["01234", "02345", "03456"]
 
 
+def test_profile_detects_near_constant_column():
+    frame = ar.from_pandas(
+        pd.DataFrame({"status": (["active"] * 95 + ["inactive"] * 5)})
+    )
+
+    report = ar.profile(frame)
+
+    assert "near_constant" in report.columns["status"].warnings
+    assert "constant" not in report.columns["status"].warnings
+
+
+def test_profile_constant_column_not_marked_near_constant():
+    frame = ar.from_pandas(pd.DataFrame({"status": ["active"] * 100}))
+
+    report = ar.profile(frame)
+
+    assert "constant" in report.columns["status"].warnings
+    assert "near_constant" not in report.columns["status"].warnings
+
+
+def test_profile_balanced_column_not_marked_near_constant():
+    frame = ar.from_pandas(
+        pd.DataFrame({"status": (["active"] * 50 + ["inactive"] * 50)})
+    )
+
+    report = ar.profile(frame)
+
+    assert "near_constant" not in report.columns["status"].warnings
+
+
+def test_profile_near_constant_ignores_nulls():
+    frame = ar.from_pandas(
+        pd.DataFrame({"status": (["active"] * 95 + ["inactive"] * 5 + [None] * 20)})
+    )
+
+    report = ar.profile(frame)
+
+    assert "near_constant" in report.columns["status"].warnings
+
+
+def test_profile_near_constant_threshold_boundary():
+    frame = ar.from_pandas(
+        pd.DataFrame({"status": (["active"] * 95 + ["inactive"] * 5)})
+    )
+
+    report = ar.profile(frame)
+
+    assert "near_constant" in report.columns["status"].warnings
+
+
 # ── string length statistics tests ───────────────────────────────────────────
 
 
@@ -989,6 +1039,48 @@ def test_report_to_markdown_escapes_pipe_characters_in_column_cells():
     assert "bad\\|name" in md
     assert "free\\|text" in md
     assert "contains \\| pipe" in md
+
+
+def test_report_to_markdown_escapes_newlines_in_cell_values():
+    """Newlines in column names or warnings must not break Markdown table rows."""
+    from arnio.quality import ColumnProfile, DataQualityReport
+
+    report = DataQualityReport(
+        row_count=2,
+        column_count=1,
+        memory_usage=128,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns={
+            "col\nname": ColumnProfile(
+                name="col\nname",
+                dtype="string\r\nwith newline",
+                semantic_type="text\rwith CR",
+                row_count=2,
+                null_count=0,
+                null_ratio=0.0,
+                unique_count=2,
+                unique_ratio=1.0,
+                warnings=["warn\nwith newline", "warn\r\nwith CRLF"],
+            )
+        },
+        suggestions=[],
+    )
+
+    md = report.to_markdown()
+
+    # Newlines must be replaced with <br>
+    assert "<br>" in md
+    assert "col\nname" not in md
+    assert "warn\nwith newline" not in md
+    assert "warn\r\nwith CRLF" not in md
+    assert "string\r\nwith newline" not in md
+    assert "text\rwith CR" not in md
+
+    # col name and warning content should still appear, escaped
+    assert "col<br>name" in md
+    assert "warn<br>with newline" in md
+    assert "warn<br>with CRLF" in md
 
 
 def test_report_to_markdown_empty_sections():
@@ -1576,3 +1668,215 @@ def test_profile_duplicate_count_hash_path_matches_pandas_baseline_at_scale():
 
     assert hash_count == baseline_count
     assert ar.profile(frame).duplicate_rows == baseline_count
+
+
+# ── numeric histogram tests ──────────────────────────────────────────────────
+
+
+def test_profile_numeric_histogram_normal():
+    # Test normal distribution / sequence
+    df = pd.DataFrame({"nums": list(range(1, 101))})
+    frame = ar.from_pandas(df)
+    report = ar.profile(frame)
+    profile = report.columns["nums"]
+
+    assert profile.histogram is not None
+    assert len(profile.histogram) == 10
+
+    # Check that counts sum to 100
+    counts = [c for _, _, c, _ in profile.histogram]
+    ratios = [r for _, _, _, r in profile.histogram]
+    assert sum(counts) == 100
+    assert abs(sum(ratios) - 1.0) < 1e-9
+
+    # Check bounds
+    assert profile.histogram[0][0] == 1.0
+    assert profile.histogram[-1][1] == 100.0
+
+    # Serialization test
+    dct = profile.to_dict()
+    assert "histogram" in dct
+    assert len(dct["histogram"]) == 10
+    assert dct["histogram"][0]["bucket_start"] == 1.0
+    assert dct["histogram"][0]["count"] == 10
+    assert abs(dct["histogram"][0]["ratio"] - 0.1) < 1e-9
+
+
+def test_profile_numeric_histogram_constant_values():
+    # Test constant values
+    df = pd.DataFrame({"nums": [5.0] * 20})
+    frame = ar.from_pandas(df)
+    report = ar.profile(frame)
+    profile = report.columns["nums"]
+
+    assert profile.histogram is not None
+    assert len(profile.histogram) == 10
+
+    counts = [c for _, _, c, _ in profile.histogram]
+    assert sum(counts) == 20
+
+    # numpy.histogram handles constant values by setting bin boundaries offset by a small delta (typically +/- 0.5)
+    # let's assert the counts are correct and serialize properly
+    dct = profile.to_dict()
+    assert "histogram" in dct
+    assert len(dct["histogram"]) == 10
+
+
+def test_profile_numeric_histogram_empty_and_all_nulls():
+    # All nulls
+    df = pd.DataFrame({"nums": [None, None, None]})
+    df["nums"] = df["nums"].astype("float64")
+    frame = ar.from_pandas(df)
+    report = ar.profile(frame)
+    profile = report.columns["nums"]
+    assert profile.histogram is None
+
+    # Empty column (0 rows)
+    df_empty = pd.DataFrame({"nums": pd.Series(dtype="float64")})
+    frame_empty = ar.from_pandas(df_empty)
+    report_empty = ar.profile(frame_empty)
+    profile_empty = report_empty.columns["nums"]
+    assert profile_empty.histogram is None
+
+
+def test_profile_numeric_histogram_missing_values():
+    # Mix of nulls and numeric values
+    df = pd.DataFrame({"nums": [10.0, None, 20.0, None, 30.0]})
+    frame = ar.from_pandas(df)
+    report = ar.profile(frame)
+    profile = report.columns["nums"]
+
+    assert profile.histogram is not None
+    assert len(profile.histogram) == 10
+    counts = [c for _, _, c, _ in profile.histogram]
+    assert sum(counts) == 3  # only non-null values are counted
+
+    ratios = [r for _, _, _, r in profile.histogram]
+    assert abs(sum(ratios) - 1.0) < 1e-5
+
+
+def test_profile_numeric_histogram_small_sample():
+    # Just 1 value
+    df = pd.DataFrame({"nums": [42.0]})
+    frame = ar.from_pandas(df)
+    report = ar.profile(frame)
+    profile = report.columns["nums"]
+
+    assert profile.histogram is not None
+    assert len(profile.histogram) == 10
+    counts = [c for _, _, c, _ in profile.histogram]
+    assert sum(counts) == 1
+
+
+def test_profile_numeric_histogram_non_numeric():
+    # String column should have histogram = None
+    df = pd.DataFrame({"names": ["Alice", "Bob", "Charlie"]})
+    frame = ar.from_pandas(df)
+    report = ar.profile(frame)
+    profile = report.columns["names"]
+
+    assert profile.histogram is None
+    assert "histogram" in profile.to_dict()
+    assert profile.to_dict()["histogram"] is None
+
+
+def test_profile_numeric_histogram_to_pandas():
+    df = pd.DataFrame({"nums": [1, 2, 3]})
+    frame = ar.from_pandas(df)
+    report = ar.profile(frame)
+
+    pdf = report.to_pandas()
+    assert "histogram" in pdf.columns
+    assert pdf.loc[pdf["name"] == "nums", "histogram"].values[0] is not None
+
+
+def test_profile_numeric_histogram_non_finite_values():
+    # Test handling of infinite values in histogram calculation
+    from arnio._core import _DType, _Frame
+    from arnio.frame import ArFrame
+
+    cpp_frame = _Frame.from_dict(
+        {"nums": [1.0, 2.0, float("inf"), float("-inf"), None, 3.0]},
+        {"nums": _DType.FLOAT64},
+    )
+    frame = ArFrame(cpp_frame)
+    report = ar.profile(frame)
+    profile = report.columns["nums"]
+
+    # The histogram should filter out +/- inf and NaNs, binning only [1.0, 2.0, 3.0]
+    assert profile.histogram is not None
+    assert len(profile.histogram) == 10
+
+    counts = [c for _, _, c, _ in profile.histogram]
+    assert sum(counts) == 3
+
+    # All infinities (no finite values to bin)
+    cpp_frame_all_inf = _Frame.from_dict(
+        {"nums": [float("inf"), float("-inf")]},
+        {"nums": _DType.FLOAT64},
+    )
+    frame_all_inf = ArFrame(cpp_frame_all_inf)
+    report_all_inf = ar.profile(frame_all_inf)
+    profile_all_inf = report_all_inf.columns["nums"]
+    assert profile_all_inf.histogram is None
+
+
+def test_report_to_markdown_escapes_newlines_in_column_cells():
+    report = ar.DataQualityReport(
+        row_count=2,
+        column_count=1,
+        memory_usage=128,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns={
+            "multi\nline": ar.ColumnProfile(
+                name="multi\nline",
+                dtype="string",
+                semantic_type="free\ntext",
+                row_count=2,
+                null_count=0,
+                null_ratio=0.0,
+                unique_count=2,
+                unique_ratio=1.0,
+                warnings=["contains\nnewline"],
+            )
+        },
+        suggestions=[],
+    )
+    md = report.to_markdown()
+    assert "multi<br>line" in md
+    assert "free<br>text" in md
+    assert "contains<br>newline" in md
+    assert "| multi\nline |" not in md
+
+
+def test_quality_gate_markdown_escapes_pipe_characters():
+    report = ar.DataQualityReport(
+        row_count=2,
+        column_count=1,
+        memory_usage=128,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns={
+            "col|name": ar.ColumnProfile(
+                name="col|name",
+                dtype="str|ing",
+                semantic_type="cat|egory",
+                row_count=2,
+                null_count=0,
+                null_ratio=0.0,
+                unique_count=2,
+                unique_ratio=1.0,
+                warnings=["pipe|warning"],
+            )
+        },
+        suggestions=[],
+    )
+
+    md = report.to_markdown()
+
+    assert r"col\|name" in md
+    assert r"str\|ing" in md
+    assert r"cat\|egory" in md
+    assert r"pipe\|warning" in md
+    assert "| col|name |" not in md

@@ -87,18 +87,37 @@ def _validate_column_sequence(
     return normalized
 
 
+def _validate_mapping(
+    mapping: Mapping[Any, Any],
+    *,
+    argument_name: str,
+    allow_empty: bool = True,
+    non_mapping_message: str | None = None,
+) -> dict[Any, Any]:
+    if not isinstance(mapping, Mapping):
+        raise TypeError(non_mapping_message or f"{argument_name} must be a mapping")
+
+    normalized = dict(mapping)
+    if not normalized and not allow_empty:
+        raise ValueError(f"{argument_name} must not be empty")
+
+    return normalized
+
+
 def _validate_string_mapping(
     mapping: Mapping[str, str],
     *,
     argument_name: str,
     allow_empty: bool = True,
 ) -> dict[str, str]:
-    if not isinstance(mapping, Mapping):
-        raise TypeError(f"{argument_name} must be a mapping of string keys to strings")
-
-    normalized = dict(mapping)
-    if not normalized and not allow_empty:
-        raise ValueError(f"{argument_name} must not be empty")
+    normalized = _validate_mapping(
+        mapping,
+        argument_name=argument_name,
+        allow_empty=allow_empty,
+        non_mapping_message=(
+            f"{argument_name} must be a mapping of string keys to strings"
+        ),
+    )
 
     invalid_keys = [key for key in normalized if not isinstance(key, str)]
     if invalid_keys:
@@ -141,9 +160,14 @@ def drop_nulls(
     >>> clean = ar.drop_nulls(frame, subset=["age", "name"])
     """
     if subset is not None:
+        requested_columns = _validate_column_sequence(subset, argument_name="subset")
+        if len(requested_columns) == 0:
+            raise ValueError(
+                "drop_nulls: subset cannot be empty; pass subset=None to check all columns"
+            )
         validate_columns_exist(
             frame,
-            _validate_column_sequence(subset, argument_name="subset"),
+            requested_columns,
             operation="drop_nulls",
         )
     result = _drop_nulls(frame._frame, subset=subset)
@@ -260,6 +284,11 @@ def keep_rows_with_nulls(
     return from_pandas(result) if is_arframe else result
 
 
+def select_columns(frame: ArFrame, columns: Sequence[str]) -> ArFrame:
+    """Return a new frame containing only the requested columns."""
+    return frame.select_columns(columns)
+
+
 def fill_nulls(
     frame: ArFrame,
     value: Any,
@@ -326,9 +355,14 @@ def drop_duplicates(
     >>> unique = ar.drop_duplicates(frame, subset=["name"], keep="first")
     """
     if subset is not None:
+        requested_columns = _validate_column_sequence(subset, argument_name="subset")
+        if len(requested_columns) == 0:
+            raise ValueError(
+                "drop_duplicates: subset cannot be empty; pass subset=None to compare all columns"
+            )
         validate_columns_exist(
             frame,
-            _validate_column_sequence(subset, argument_name="subset"),
+            requested_columns,
             operation="drop_duplicates",
         )
     if keep is True:
@@ -348,9 +382,8 @@ def drop_constant_columns(frame: ArFrame) -> ArFrame:
     ``[1, 1, None]`` are kept. Empty columns in zero-row frames are also kept,
     since they have zero unique values rather than one.
 
-    If every column is dropped, the zero-column pandas result is converted back
-    to an ``ArFrame``. Arnio currently derives row count from stored columns, so
-    that converted frame may report zero rows.
+    If every column is dropped, the resulting zero-column frame preserves the
+    original row count.
 
     Parameters
     ----------
@@ -1277,14 +1310,15 @@ def replace_values(frame, mapping, column=None):
 
     from .convert import from_pandas, to_pandas
 
-    if not isinstance(mapping, dict):
-        raise TypeError(
+    mapping = _validate_mapping(
+        mapping,
+        argument_name="mapping",
+        allow_empty=False,
+        non_mapping_message=(
             "mapping must be a dict-like mapping of {old_value: new_value}, "
             f"not {type(mapping).__name__}."
-        )
-    if not mapping:
-        raise ValueError("mapping must not be empty")
-
+        ),
+    )
     is_arframe = not isinstance(frame, pd.DataFrame)
     # Avoid mutating the caller's DataFrame in the direct pandas API path.
     df = to_pandas(frame) if is_arframe else frame.copy()
@@ -1386,5 +1420,64 @@ def standardize_missing_tokens(frame, tokens=None, subset=None):
             df[subset] = df[subset].replace(default_tokens, float("nan"))
         else:
             df[subset] = df[subset].replace(tokens, float("nan"))
+
+    return from_pandas(df) if is_arframe else df
+
+
+def coalesce_columns(
+    frame,
+    *,
+    subset: list[str],
+    output_column: str = "coalesced",
+):
+    """Select the first non-null value from a list of columns.
+
+    Parameters
+    ----------
+    frame : ArFrame or pd.DataFrame
+        Input data frame.
+    subset : list[str]
+        List of columns to check in order.
+    output_column : str, default "coalesced"
+        Name of the new column to store coalesced values.
+
+    Returns
+    -------
+    ArFrame or pd.DataFrame
+        New frame with coalesced column.
+    """
+    import pandas as pd
+
+    from .convert import from_pandas, to_pandas
+    from .frame import ArFrame
+
+    if not isinstance(subset, list):
+        raise TypeError("subset must be a list of column names")
+    if not subset:
+        raise ValueError("subset must contain at least one column")
+    if not isinstance(output_column, str) or not output_column.strip():
+        raise ValueError("output_column must be a non-empty string")
+
+    is_arframe = isinstance(frame, ArFrame)
+    if not is_arframe and not isinstance(frame, pd.DataFrame):
+        raise TypeError("frame must be an ArFrame or a pandas DataFrame")
+
+    column_names = list(frame.columns)
+    subset_columns = _validate_column_sequence(subset, argument_name="subset")
+
+    missing = [column for column in subset_columns if column not in column_names]
+    if missing:
+        available = ", ".join(column_names) or "<none>"
+        raise KeyError(
+            f"Missing columns for coalesce_columns: {missing}. Available columns: {available}"
+        )
+
+    if output_column in column_names:
+        raise ValueError(f"Output column '{output_column}' already exists.")
+
+    df = to_pandas(frame) if is_arframe else frame.copy()
+
+    # Select the first non-null/non-NaN/non-None value per row
+    df[output_column] = df[subset_columns].bfill(axis=1).iloc[:, 0]
 
     return from_pandas(df) if is_arframe else df

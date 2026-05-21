@@ -15,6 +15,7 @@ from .cleaning import (
     cast_types,
     clean,
     clip_numeric,
+    coalesce_columns,
     combine_columns,
     drop_columns,
     drop_columns_matching,
@@ -31,6 +32,7 @@ from .cleaning import (
     replace_values,
     round_numeric_columns,
     safe_divide_columns,
+    select_columns,
     standardize_missing_tokens,
     strip_whitespace,
     trim_column_names,
@@ -46,7 +48,7 @@ from .exceptions import (
     UnknownStepError,
 )
 from .frame import ArFrame
-from .integrations import ArnioPandasAccessor
+from .integrations import ArnioPandasAccessor, register_duckdb
 from .io import (
     read_csv,
     read_csv_chunked,
@@ -54,8 +56,16 @@ from .io import (
     scan_csv,
     sniff_delimiter,
     write_csv,
+    write_parquet,
 )
-from .pipeline import get_builtin_step_signatures, pipeline, register_step
+from .pipeline import (
+    PipelineContext,
+    get_builtin_step_signatures,
+    list_steps,
+    pipeline,
+    register_step,
+    reset_steps,
+)
 from .quality import (
     CleanExplanation,
     CleanStepRecord,
@@ -103,11 +113,13 @@ __all__ = [
     "read_csv_chunked",
     "read_jsonl",
     "write_csv",
+    "write_parquet",
     "scan_csv",
     "sniff_delimiter",
     # Cleaning
     "drop_nulls",
     "drop_columns",
+    "select_columns",
     "keep_rows_with_nulls",
     "fill_nulls",
     "validate_columns_exist",
@@ -116,6 +128,7 @@ __all__ = [
     "drop_duplicates",
     "drop_constant_columns",
     "clip_numeric",
+    "coalesce_columns",
     "combine_columns",
     "drop_columns_matching",
     "strip_whitespace",
@@ -133,10 +146,14 @@ __all__ = [
     "from_pandas",
     # Integrations
     "ArnioPandasAccessor",
+    "register_duckdb",
     # Pipeline
     "pipeline",
     "register_step",
     "get_builtin_step_signatures",
+    "list_steps",
+    "PipelineContext",
+    "reset_steps",
     # Data quality
     "profile",
     "compare_profiles",

@@ -13,7 +13,13 @@ from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from typing import cast
 
-from ._core import _CsvChunkReader, _CsvConfig, _CsvReader, _CsvWriteConfig, _CsvWriter
+from ._core import (  # type: ignore
+    _CsvChunkReader,
+    _CsvConfig,
+    _CsvReader,
+    _CsvWriteConfig,
+    _CsvWriter,
+)
 from .exceptions import CsvReadError, JsonlReadError
 from .frame import ArFrame
 
@@ -239,6 +245,15 @@ def _validate_null_values(null_values: list[str]) -> list[str]:
     return list(null_values)
 
 
+def _validate_bool_option(value: bool, name: str) -> bool:
+    """Validate that a boolean option is strictly True or False."""
+    if not isinstance(value, bool):
+        raise TypeError(
+            f"{name} must be True or False, got {type(value).__name__}: {value!r}"
+        )
+    return value
+
+
 def _validate_parser_mode(mode: str) -> str:
     """Validate CSV parser mode."""
     if not isinstance(mode, str):
@@ -296,10 +311,11 @@ def _reject_utf8_nul_bytes(path: str) -> None:
 def read_csv(
     path: str | os.PathLike[str],
     *,
-    delimiter: str = ",",
+    delimiter: str | None = None,
     has_header: bool = True,
     usecols: list[str] | None = None,
     nrows: int | None = None,
+    skiprows: int | None = None,
     encoding: str = "utf-8",
     trim_headers: bool = True,
     thousands_separator: str | None = None,
@@ -312,15 +328,25 @@ def read_csv(
     ----------
     path : str or file-like object
         Filesystem path or text file-like object containing CSV data.
-        Supports .csv, .txt, and .tsv extensions for path inputs.
-    delimiter : str, default ","
-        Field delimiter character.
+        Any file extension is accepted. For ``.tsv`` files, the delimiter
+        is automatically set to ``'\t'`` when ``delimiter`` is omitted.
+    delimiter : str or None, default None
+        Field delimiter character.  When ``None`` (the default) the
+        delimiter is inferred from the file extension: ``'\t'`` for
+        ``.tsv`` files and ``','`` for everything else.  Passing an
+        explicit value always takes precedence — for example,
+        ``delimiter=','`` reads a comma-delimited ``.tsv`` file without
+        any auto-detection.
     has_header : bool, default True
         Whether the file has a header row.
     usecols : list[str], optional
         Columns to read. If None, reads all columns.
     nrows : int, optional
         Number of rows to read. If None, reads all rows.
+    skiprows : int, optional
+        Number of lines to skip before reading the header. Useful for
+        CSV files with metadata preambles before the actual data.
+        If None, no lines are skipped.
     encoding : str, default "utf-8"
         File encoding.
     trim_headers : bool, default True
@@ -339,6 +365,8 @@ def read_csv(
 
         - strict: raises CsvReadError on inconsistent row widths.
         - permissive: fills missing trailing fields with nulls.
+        - both modes reject extra fields because they would otherwise be
+          silently dropped.
 
     Returns
     -------
@@ -348,28 +376,30 @@ def read_csv(
     Raises
     ------
     ValueError
-        If file format is unsupported or if thousands_separator is invalid.
+        If thousands_separator is invalid.
 
     TypeError
-        If thousands_separator is not a string or None.
+        If delimiter is not a string or None, or thousands_separator is
+        not a string or None.
 
     CsvReadError
         If CSV input contains NUL bytes and appears binary or corrupted.
 
     Examples
     --------
-    >>> frame = ar.read_csv("data.csv", delimiter=",", has_header=True)
+    >>> frame = ar.read_csv("data.csv")           # comma delimiter
+    >>> frame = ar.read_csv("data.tsv")           # tab auto-detected
+    >>> frame = ar.read_csv("data.tsv", delimiter=",")  # explicit comma honoured
+    >>> frame = ar.read_csv("data.dat")           # non-standard extension accepted
     """
     path, should_cleanup = _materialize_csv_input(path)
     path_lower = path.lower()
-    if not (
-        path_lower.endswith(".csv")
-        or path_lower.endswith(".txt")
-        or path_lower.endswith(".tsv")
-    ):
-        raise ValueError(
-            f"Unsupported file format: {path}. Only .csv, .txt, and .tsv are supported."
-        )
+
+    # Resolve the sentinel: auto-detect tab for .tsv only when the caller
+    # truly omitted delimiter (None).  An explicit delimiter="," is always
+    # honoured, even for .tsv paths.
+    if delimiter is None:
+        delimiter = "\t" if path_lower.endswith(".tsv") else ","
 
     if _is_utf8_encoding(encoding):
         _reject_utf8_nul_bytes(path)
@@ -384,9 +414,9 @@ def read_csv(
     mode = _validate_parser_mode(mode)
     config = _CsvConfig()
     config.delimiter = delimiter
-    config.has_header = has_header
+    config.has_header = _validate_bool_option(has_header, "has_header")
     config.encoding = encoding
-    config.trim_headers = trim_headers
+    config.trim_headers = _validate_bool_option(trim_headers, "trim_headers")
     config.thousands_separator = thousands_separator
     config.mode = mode
 
@@ -398,6 +428,9 @@ def read_csv(
 
     if nrows is not None:
         config.nrows = _validate_nrows(nrows)
+
+    if skiprows is not None:
+        config.skip_rows = _validate_skip_rows(skiprows)
 
     reader = _CsvReader(config)
 
@@ -466,6 +499,8 @@ def read_csv_chunked(
         Strings treated as null values.
     mode : {"strict", "permissive"}, default "strict"
         Controls malformed row handling.
+        Both modes reject extra fields; permissive mode only allows missing
+        trailing fields, which are filled with nulls.
 
     Yields
     ------
@@ -504,9 +539,9 @@ def read_csv_chunked(
 
     config = _CsvConfig()
     config.delimiter = delimiter
-    config.has_header = has_header
+    config.has_header = _validate_bool_option(has_header, "has_header")
     config.encoding = encoding
-    config.trim_headers = trim_headers
+    config.trim_headers = _validate_bool_option(trim_headers, "trim_headers")
     config.thousands_separator = thousands_separator
     config.mode = mode
     config.skip_rows = skip_rows
@@ -600,7 +635,7 @@ def write_csv(
 
     config = _CsvWriteConfig()
     config.delimiter = delimiter
-    config.write_header = write_header
+    config.write_header = _validate_bool_option(write_header, "write_header")
     config.line_terminator = line_terminator
 
     writer = _CsvWriter(config)
@@ -613,21 +648,27 @@ def write_csv(
 def scan_csv(
     path: str | os.PathLike[str],
     *,
-    delimiter: str = ",",
+    delimiter: str | None = None,
     encoding: str = "utf-8",
     trim_headers: bool = True,
     thousands_separator: str | None = None,
     sample_size: int | None = None,
     null_values: list[str] | None = None,
+    has_header: bool = True,
 ) -> dict[str, str]:
     """Return schema (column names + inferred types) without loading data.
 
     Parameters
     ----------
     path : str
-        Path to the CSV file. Supports .csv, .txt, and .tsv extensions.
-    delimiter : str, default ","
-        Field delimiter character.
+        Path to the CSV file. Any file extension is accepted. For ``.tsv``
+        files, the delimiter is automatically set to ``'\t'`` when
+        ``delimiter`` is omitted.
+    delimiter : str or None, default None
+        Field delimiter character.  When ``None`` (the default) the
+        delimiter is inferred from the file extension: ``'\t'`` for
+        ``.tsv`` files and ``','`` for everything else.  Passing an
+        explicit value always takes precedence.
     encoding : str, default "utf-8"
         File encoding. For non-UTF-8 inputs, a sample of the file is
         transcoded to infer the schema.
@@ -643,6 +684,12 @@ def scan_csv(
         1,234 is interpreted as two separate fields.
     sample_size : int, optional
         Number of rows to read for type inference. If None, defaults to 100 rows.
+    has_header : bool, default True
+        Whether the CSV file contains a header row.
+
+        When False, synthetic column names are generated
+        in the form ``col_0``, ``col_1``, etc., matching
+        the behavior of ``read_csv(..., has_header=False)``.
 
     Returns
     -------
@@ -652,10 +699,11 @@ def scan_csv(
     Raises
     ------
     ValueError
-        If file format is unsupported or if thousands_separator is invalid.
+        If thousands_separator is invalid.
 
     TypeError
-        If thousands_separator is not a string or None.
+        If delimiter is not a string or None, or thousands_separator is
+        not a string or None.
 
     CsvReadError
         If CSV input contains NUL bytes and appears binary or corrupted.
@@ -665,17 +713,18 @@ def scan_csv(
     >>> schema = ar.scan_csv("data.csv")
     >>> print(schema)
     {'name': 'string', 'age': 'int64'}
+    >>> schema = ar.scan_csv("data.tsv")              # tab auto-detected
+    >>> schema = ar.scan_csv("data.tsv", delimiter=",")  # explicit comma honoured
+    >>> schema = ar.scan_csv("data.dat")              # non-standard extension accepted
     """
     path = os.fspath(path)
     path_lower = path.lower()
-    if not (
-        path_lower.endswith(".csv")
-        or path_lower.endswith(".txt")
-        or path_lower.endswith(".tsv")
-    ):
-        raise ValueError(
-            f"Unsupported file format: {path}. Only .csv, .txt, and .tsv are supported."
-        )
+
+    # Resolve the sentinel: auto-detect tab for .tsv only when the caller
+    # truly omitted delimiter (None).  An explicit delimiter="," is always
+    # honoured, even for .tsv paths.
+    if delimiter is None:
+        delimiter = "\t" if path_lower.endswith(".tsv") else ","
 
     if _is_utf8_encoding(encoding):
         _reject_utf8_nul_bytes(path)
@@ -691,8 +740,9 @@ def scan_csv(
     config = _CsvConfig()
     config.delimiter = delimiter
     config.encoding = encoding
-    config.trim_headers = trim_headers
+    config.trim_headers = _validate_bool_option(trim_headers, "trim_headers")
     config.thousands_separator = thousands_separator
+    config.has_header = has_header
 
     if null_values is not None:
         config.null_values = _validate_null_values(null_values)
@@ -964,3 +1014,95 @@ def sniff_delimiter(
         )
 
     return best_candidates[0]
+
+
+_VALID_COMPRESSIONS = {"snappy", "gzip", "brotli", "zstd", "none"}
+
+
+def write_parquet(
+    frame: ArFrame,
+    path: str | os.PathLike[str],
+    *,
+    compression: str = "snappy",
+    row_group_size: int | None = None,
+) -> None:
+    """Write an ArFrame to a Parquet file via pyarrow.
+
+    Requires the ``pyarrow`` package.  Install it with::
+
+        pip install arnio[parquet]
+
+    The implementation converts the frame to a pandas DataFrame via
+    :func:`to_pandas` and delegates encoding to
+    ``pandas.DataFrame.to_parquet(engine="pyarrow")``.
+
+    Parameters
+    ----------
+    frame : ArFrame
+        The data frame to write.
+    path : str or path-like
+        Destination file path.  Must end with ``.parquet`` or ``.pq``.
+    compression : str, default ``"snappy"``
+        Parquet compression codec.  Accepted values: ``"snappy"``,
+        ``"gzip"``, ``"brotli"``, ``"zstd"``, ``"none"``.
+    row_group_size : int, optional
+        Number of rows per Parquet row group.  If ``None``, pyarrow
+        chooses the default (typically 128 MB per group).  Must be a
+        positive integer when provided.
+
+    Raises
+    ------
+    ImportError
+        If ``pyarrow`` is not installed.
+    ValueError
+        If the file extension is not ``.parquet`` or ``.pq``, if
+        ``compression`` is not a recognised codec, or if
+        ``row_group_size`` is not a positive integer.
+
+    Examples
+    --------
+    >>> ar.write_parquet(frame, "output.parquet")
+    >>> ar.write_parquet(frame, "output.pq", compression="zstd")
+    >>> ar.write_parquet(frame, "output.parquet", row_group_size=50_000)
+    """
+    from .convert import to_pandas
+
+    path = os.fspath(path)
+    path_lower = path.lower()
+    if not (path_lower.endswith(".parquet") or path_lower.endswith(".pq")):
+        raise ValueError(
+            f"Unsupported file format: {path}. "
+            "write_parquet only supports .parquet and .pq files."
+        )
+
+    if compression not in _VALID_COMPRESSIONS:
+        raise ValueError(
+            f"Unknown compression codec: {compression!r}. "
+            f"Valid options are: {sorted(_VALID_COMPRESSIONS)}"
+        )
+
+    if row_group_size is not None:
+        if isinstance(row_group_size, bool) or not isinstance(row_group_size, int):
+            raise TypeError("row_group_size must be an integer")
+        if row_group_size <= 0:
+            raise ValueError("row_group_size must be a positive integer")
+
+    try:
+        import pyarrow  # noqa: F401 — presence check only
+    except ImportError as exc:
+        raise ImportError(
+            "pyarrow is required for Parquet export. "
+            "Install it with: pip install arnio[parquet]"
+        ) from exc
+
+    df = to_pandas(frame)
+
+    kwargs: dict = {
+        "engine": "pyarrow",
+        "compression": None if compression == "none" else compression,
+        "index": False,
+    }
+    if row_group_size is not None:
+        kwargs["row_group_size"] = row_group_size
+
+    df.to_parquet(path, **kwargs)

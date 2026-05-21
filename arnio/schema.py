@@ -5,11 +5,13 @@ Production data contracts and validation.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
+import numpy as np
 import pandas as pd
 
 from .convert import to_pandas
@@ -376,6 +378,58 @@ class Schema:
         """
 
         return validate(frame, self, max_errors=max_errors)
+
+    def to_json(self) -> str:
+        """Serialize the schema to a stable JSON string."""
+        if self.rules:
+            raise ValueError(
+                "Schema rules are not JSON serializable. "
+                "Serialize only fields/strict/unique for now."
+            )
+
+        payload = {
+            "fields": {
+                name: _field_to_json_dict(field_def)
+                for name, field_def in sorted(self.fields.items())
+            },
+            "strict": self.strict,
+            "unique": list(self.unique) if self.unique is not None else None,
+        }
+        return json.dumps(payload, sort_keys=True)
+
+    @classmethod
+    def from_json(cls, value: str) -> Schema:
+        """Deserialize a schema from a JSON string produced by ``to_json()``."""
+        try:
+            payload = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid schema JSON: {exc.msg}") from exc
+
+        if not isinstance(payload, dict):
+            raise TypeError(
+                "Schema JSON must decode to an object with 'fields', 'strict', and optional 'unique'."
+            )
+
+        fields_payload = payload.get("fields")
+        if not isinstance(fields_payload, dict):
+            raise TypeError(
+                "Schema JSON 'fields' must be an object mapping names to field definitions."
+            )
+
+        fields = {
+            name: _field_from_json_dict(name, field_payload)
+            for name, field_payload in fields_payload.items()
+        }
+
+        strict = payload.get("strict", False)
+        if not isinstance(strict, bool):
+            raise TypeError("Schema JSON 'strict' must be a boolean.")
+
+        unique = payload.get("unique")
+        if unique is not None and not isinstance(unique, list):
+            raise TypeError("Schema JSON 'unique' must be a list of strings or null.")
+
+        return cls(fields=fields, strict=strict, unique=unique)
 
     @classmethod
     def bootstrap_from_report(cls, report: Any) -> Schema:
@@ -1457,6 +1511,59 @@ def DateTime(
     )
 
 
+def _is_safely_convertible_to_dtype(
+    series: pd.Series,
+    expected_dtype: str,
+    column_name: str,
+) -> bool:
+    try:
+        non_null = series.dropna()
+
+        if len(non_null) == 0:
+            return False
+
+        values = non_null.astype(str)
+
+        lower_name = column_name.lower()
+
+        is_identifier_like = (
+            lower_name == "id"
+            or lower_name.endswith("_id")
+            or lower_name
+            in {
+                "uuid",
+                "zip",
+                "zipcode",
+                "zip_code",
+            }
+        )
+
+        if is_identifier_like:
+            if values.str.match(r"^0\d+$").any():
+                return False
+
+        if expected_dtype == "int64":
+            if not values.str.match(r"^-?\d+$").all():
+                return False
+
+            parsed = pd.to_numeric(values, errors="raise")
+
+            int64_info = np.iinfo(np.int64)
+            if (parsed < int64_info.min).any() or (parsed > int64_info.max).any():
+                return False
+
+            return True
+
+        if expected_dtype == "float64":
+            pd.to_numeric(values, errors="raise")
+            return True
+
+    except Exception:
+        return False
+
+    return False
+
+
 def _validate_column(
     df: pd.DataFrame,
     series: pd.Series,
@@ -1468,30 +1575,49 @@ def _validate_column(
 
     if field_def.dtype is not None and actual_dtype != field_def.dtype:
         if not (field_def.dtype == "datetime" and actual_dtype == "string"):
+
+            message = (
+                f"Column {name!r} has dtype {actual_dtype!r}; "
+                f"expected {field_def.dtype!r}"
+            )
+            if (
+                actual_dtype == "string"
+                and field_def.dtype in {"int64", "float64"}
+                and _is_safely_convertible_to_dtype(
+                    df[name],
+                    field_def.dtype,
+                    name,
+                )
+            ):
+                message += (
+                    f". Values appear safely convertible " f"to '{field_def.dtype}'"
+                )
+
             issues.append(
                 ValidationIssue(
                     column=name,
                     rule="dtype",
-                    message=(
-                        f"Column {name!r} has dtype {actual_dtype!r}; "
-                        f"expected {field_def.dtype!r}"
-                    ),
+                    message=message,
                     severity=field_def.severity,
                 )
             )
 
+    is_null_mask = series.isna()
+    if actual_dtype in ("object", "string"):
+        is_null_mask = is_null_mask | (series.fillna("").astype(str).str.strip() == "")
+
     if not field_def.nullable:
         issues.extend(
             _row_issues(
-                series[series.isna()],
+                series[is_null_mask],
                 column=name,
                 rule="nullable",
-                message=f"Column {name!r} contains null values",
+                message=f"Column {name!r} contains null or empty values",
                 severity=field_def.severity,
             )
         )
 
-    non_null = series.dropna()
+    non_null = series[~is_null_mask]
 
     if field_def.required_if is not None:
         condition_column, expected_value = field_def.required_if
@@ -1787,6 +1913,67 @@ def _field_to_dict(field_def: Field) -> dict[str, Any]:
         "datetime_max": _clean_scalar(field_def._datetime_max),
         "required_if": _normalize_sequence(field_def.required_if),
     }
+
+
+def _field_to_json_dict(field_def: Field) -> dict[str, Any]:
+    data = _field_to_dict(field_def)
+    data["severity"] = field_def.severity
+    data["datetime_min"] = (
+        field_def._datetime_min.isoformat()
+        if field_def._datetime_min is not None
+        else None
+    )
+    data["datetime_max"] = (
+        field_def._datetime_max.isoformat()
+        if field_def._datetime_max is not None
+        else None
+    )
+    return data
+
+
+def _field_from_json_dict(name: str, payload: Any) -> Field:
+    if not isinstance(payload, dict):
+        raise TypeError(
+            f"Schema JSON field for column {name!r} must be an object, got {type(payload).__name__}."
+        )
+
+    allowed = payload.get("allowed")
+    if allowed is not None:
+        if not isinstance(allowed, list):
+            raise TypeError(
+                f"Schema JSON field {name!r} 'allowed' must be a list or null."
+            )
+        allowed = set(allowed)
+
+    required_if = payload.get("required_if")
+    if required_if is not None:
+        if not isinstance(required_if, list) or len(required_if) != 2:
+            raise TypeError(
+                f"Schema JSON field {name!r} 'required_if' must be a 2-item list or null."
+            )
+        required_if = tuple(required_if)
+
+    return Field(
+        dtype=payload.get("dtype"),
+        nullable=payload.get("nullable", True),
+        min=payload.get("min"),
+        max=payload.get("max"),
+        pattern=payload.get("pattern"),
+        semantic=payload.get("semantic"),
+        allowed=allowed,
+        unique=payload.get("unique", False),
+        min_length=payload.get("min_length"),
+        max_length=payload.get("max_length"),
+        format=payload.get("format"),
+        _datetime_min=_parse_datetime_bound(
+            payload.get("datetime_min"), "datetime_min"
+        ),
+        _datetime_max=_parse_datetime_bound(
+            payload.get("datetime_max"), "datetime_max"
+        ),
+        required_if=required_if,
+        severity=payload.get("severity", "error"),
+    )
 
 
 def _normalize_unique(

@@ -94,6 +94,12 @@ def _normalize_scalar(value: object) -> object:
         return None
     if isinstance(value, np.generic):
         value = value.item()
+    if isinstance(value, int) and not isinstance(value, bool):
+        if value < -9223372036854775808 or value > 9223372036854775807:
+            raise ValueError(
+                f"Integer value {value} is out of bounds for signed 64-bit integer. "
+                "arnio only supports signed 64-bit integers (-9223372036854775808 to 9223372036854775807)."
+            )
     if isinstance(value, float):
         return _to_binding_safe(value)
     if not isinstance(value, (bool, int, str)):
@@ -228,7 +234,10 @@ def to_pandas(frame: ArFrame, *, copy: bool = False) -> pd.DataFrame:
             series[mask] = pd.NA
             data[name] = series
 
-    result = pd.DataFrame(data)
+    if not data:
+        result = pd.DataFrame(index=pd.RangeIndex(cpp_frame.num_rows()))
+    else:
+        result = pd.DataFrame(data)
     if frame._attrs:
         result.attrs = copylib.deepcopy(frame._attrs)
     return result
@@ -316,5 +325,5 @@ def from_pandas(df: pd.DataFrame) -> ArFrame:
         if dtype_hint is not None:
             dtype_hints[name] = dtype_hint
 
-    cpp_frame = _Frame.from_dict(columns, dtype_hints)
+    cpp_frame = _Frame.from_dict(columns, dtype_hints, len(df))
     return ArFrame(cpp_frame, attrs=copylib.deepcopy(df.attrs))
