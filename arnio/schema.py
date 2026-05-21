@@ -910,6 +910,7 @@ def validate(
                 )
 
             continue
+<<<<<<< HEAD
         column_issues = _validate_column(
             df,
             df[name],
@@ -935,6 +936,17 @@ def validate(
                     {issue.row_index for issue in issues if issue.row_index is not None}
                 ),
             )
+=======
+        issues.extend(
+             _validate_column(
+                 df,
+                 df[name],
+                 dtypes.get(name),
+                 name,
+                 field_def,
+                )
+        )
+>>>>>>> 2ee7c7d (Fix max_errors validation behavior)
 
     if schema.strict:
         expected = set(schema.fields)
