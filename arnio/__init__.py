@@ -106,6 +106,7 @@ from .schema import (
     register_validator,
     validate,
 )
+from .schema_export import schema_to_dict, schema_to_yaml
 
 from_records = ArFrame.from_records
 
@@ -206,4 +207,6 @@ __all__ = [
     "Custom",
     "register_validator",
     "Date",
+    "schema_to_dict",
+    "schema_to_yaml",
 ]
