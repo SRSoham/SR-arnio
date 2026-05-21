@@ -59,6 +59,7 @@ from .io import (
     write_parquet,
 )
 from .pipeline import (
+    PipelineContext,
     get_builtin_step_signatures,
     list_steps,
     pipeline,
@@ -151,6 +152,7 @@ __all__ = [
     "register_step",
     "get_builtin_step_signatures",
     "list_steps",
+    "PipelineContext",
     "reset_steps",
     # Data quality
     "profile",
