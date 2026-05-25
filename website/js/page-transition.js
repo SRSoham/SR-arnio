@@ -13,6 +13,7 @@ document.addEventListener("DOMContentLoaded", () => {
       link.addEventListener("click", (e) => {
         e.preventDefault();
 
+        document.body.classList.add("page-transition");
         document.body.classList.add("fade-out");
 
         setTimeout(() => {
