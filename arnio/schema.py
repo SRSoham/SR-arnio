@@ -2563,7 +2563,12 @@ def _validate_column(
             else:
                 invalid = non_null[
                     ~non_null.map(
-                        lambda v: _normalize_validator_result(fn(v), validator_name)
+                        lambda v: _run_custom_validator(
+                            fn,
+                            v,
+                            column=name,
+                            validator_name=validator_name,
+                        )
                     )
                 ]
                 issues.extend(
@@ -3008,6 +3013,24 @@ def _normalize_validator_result(result: object, validator_name: str) -> bool:
         f"{type(result).__name__!r} ({result!r}); "
         "validators must return True (pass) or False (fail)."
     )
+
+
+def _run_custom_validator(
+    fn: Callable[[Any], object],
+    value: Any,
+    *,
+    column: str,
+    validator_name: str,
+) -> bool:
+    """Run a registered custom validator and add schema context on failure."""
+    try:
+        result = fn(value)
+    except Exception as exc:
+        raise ArnioError(
+            f"Custom validator {validator_name!r} failed for column "
+            f"{column!r} with value {value!r}: {exc}"
+        ) from exc
+    return _normalize_validator_result(result, validator_name)
 
 
 def Custom(

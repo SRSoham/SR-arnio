@@ -2866,7 +2866,7 @@ def test_register_validator_raises_for_empty_name():
         raise AssertionError("Expected ValueError for empty name")
 
 
-def test_custom_validator_exceptions_propagate(tmp_path):
+def test_custom_validator_exceptions_include_schema_context(tmp_path):
     def broken_validator(value):
         raise RuntimeError("validator exploded")
 
@@ -2875,13 +2875,17 @@ def test_custom_validator_exceptions_propagate(tmp_path):
     path = tmp_path / "scores.csv"
     path.write_text("score\n1\n")
 
-    with pytest.raises(RuntimeError) as exc:
+    with pytest.raises(ar.ArnioError) as exc:
         ar.validate(
             ar.read_csv(path),
             {"score": ar.Custom("broken")},
         )
 
-    assert "validator exploded" in str(exc.value)
+    message = str(exc.value)
+    assert "broken" in message
+    assert "score" in message
+    assert "validator exploded" in message
+    assert isinstance(exc.value.__cause__, RuntimeError)
 
 
 def test_schema_rules_multiple_rules_all_run(tmp_path):
