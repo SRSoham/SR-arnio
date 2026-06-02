@@ -49,7 +49,7 @@ needs_arnio = pytest.mark.skipif(
 # ---------------------------------------------------------------------------
 
 _CSV_CONTENT = "name,age,score\nAlice,30,9.5\nBob,25,7.0\n"
-_CSV_BYTES = _CSV_CONTENT.encode("utf-8")
+_CSV_BYTES = _CSV_CONTENT.encode()
 
 
 class _SingleFileHandler(http.server.BaseHTTPRequestHandler):
@@ -274,7 +274,7 @@ class TestFetchUrlToTempfileIncrementalDecoding:
         raise RemoteReadError.  The euro sign € is 3 bytes (\xe2\x82\xac);
         we split it so the first two bytes land in chunk 1 and the third in
         chunk 2, which would break a naive per-chunk decode."""
-        euro_csv = "name,price\nCoffee,\u20ac2.50\n".encode("utf-8")
+        euro_csv = "name,price\nCoffee,\u20ac2.50\n".encode()
 
         # Find the start of the 3-byte euro sign and split across it
         euro_pos = euro_csv.index(b"\xe2")
@@ -299,7 +299,7 @@ class TestFetchUrlToTempfileIncrementalDecoding:
     def test_four_byte_char_split_across_chunks_does_not_raise(self):
         """Same split test with a 4-byte character (𝄞, U+1D11E, musical symbol G clef)
         to cover the full range of valid UTF-8 sequences."""
-        gclef_csv = "col\n\U0001d11e\n".encode("utf-8")
+        gclef_csv = "col\n\U0001d11e\n".encode()
 
         # 4-byte sequence: split after byte 2
         gclef_pos = gclef_csv.index(b"\xf0")
