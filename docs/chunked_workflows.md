@@ -43,17 +43,18 @@ arnio.read_csv_chunked(
     path,
     *,
     chunksize=10_000,
-    delimiter=",",
+    delimiter=None,
     has_header=True,
     usecols=None,
     dtype=None,
     nrows=None,
     skip_rows=0,
-    trim_headers=False,
+    skiprows=0,
+    trim_headers=True,
     decimal_separator=".",
     thousands_separator=None,
     null_values=None,
-    mode="default",
+    mode="strict",
     encoding="utf-8",
     on_bad_lines="error",
 )
@@ -67,17 +68,17 @@ and inferred types.
 |---|---|---|---|
 | `path` | `str \| os.PathLike` | — | Path to the CSV file. |
 | `chunksize` | `int` | `10_000` | Maximum rows per yielded `ArFrame`. The last chunk may be smaller. |
-| `delimiter` | `str` | `","` | Column delimiter. |
+| `delimiter` | `str \| None` | `None` | Column delimiter. `None` auto-detects from the file (tries `,`, `;`, `\t`, `\|`). |
 | `has_header` | `bool` | `True` | Whether the first row is a header. |
 | `usecols` | `list[str] \| None` | `None` | Subset of columns to load. |
 | `dtype` | `dict[str, str] \| None` | `None` | Force specific types for named columns instead of inferring them (e.g. `{"id": "string"}`). |
 | `nrows` | `int \| None` | `None` | Stop after reading this many rows in total across all chunks. `None` reads to end-of-file. |
-| `skip_rows` | `int` | `0` | Number of rows to skip at the top of the file before the header. |
-| `trim_headers` | `bool` | `False` | Strip leading and trailing whitespace from column header names. |
+| `skip_rows` / `skiprows` | `int` | `0` | Number of rows to skip at the top of the file before the header. Both spellings are accepted and behave identically. |
+| `trim_headers` | `bool` | `True` | Strip leading and trailing whitespace from column header names. |
 | `decimal_separator` | `str` | `"."` | Decimal point character. Use `","` for European-style CSVs. |
 | `thousands_separator` | `str \| None` | `None` | Thousands grouping character (e.g. `","`). Stripped before numeric parsing. |
 | `null_values` | `list[str] \| None` | `None` | Additional strings to treat as null (e.g. `["N/A", "–", "none"]`). Always combined with the built-in set. |
-| `mode` | `str` | `"default"` | Parsing mode. `"default"` follows `on_bad_lines`; `"strict"` raises on the first malformed line regardless of `on_bad_lines`. |
+| `mode` | `str` | `"strict"` | Parsing mode. `"strict"` raises on the first malformed line regardless of `on_bad_lines`; `"default"` follows `on_bad_lines`. |
 | `encoding` | `str` | `"utf-8"` | File encoding. Non-UTF-8 input is transcoded before the C++ parser runs. |
 | `on_bad_lines` | `"error" \| "warn" \| "skip"` | `"error"` | Behaviour when a malformed line is encountered. Ignored when `mode="strict"`. |
 
