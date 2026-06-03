@@ -4324,8 +4324,8 @@ def test_score_breakdown_defaults():
     # required keys
     expected_keys = [
         "null_penalty",
-        "duplicate_penalty",
-        "dtype_mismatch_penalty",
+        "uplicate_penalty",
+        "type_mismatch_penalty",
         "final_score"
     ]
 
