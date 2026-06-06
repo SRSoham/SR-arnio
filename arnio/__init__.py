@@ -43,6 +43,7 @@ from .cleaning import (
     winsorize_outliers,
 )
 from .convert import from_dict, from_pandas, from_polars, to_arrow, to_pandas, to_polars
+from .encode_categorical import encode_categorical
 from .exceptions import (
     ArnioError,
     CsvReadError,
@@ -242,4 +243,5 @@ __all__ = [
     "schema_from_yaml",
     "schema_to_dict",
     "schema_to_yaml",
+    "encode_categorical",
 ]
