@@ -10,20 +10,32 @@ schema_to_yaml(schema, path=None) -> str
     Return the YAML string.  When *path* is given the string is also written
     to that file (UTF-8, trailing newline guaranteed).
 
-Only the Python standard library is required (no PyYAML dependency).
-The emitter is intentionally minimal: it covers the types arnio actually
-produces (str, int, float, bool, None, list, dict) and raises ``TypeError``
-for anything else so the contract stays explicit.
+schema_from_yaml(source) -> Schema
+    Load a Schema from a YAML file path or raw YAML string.  This is the
+    inverse of ``schema_to_yaml`` and reuses the existing ``Schema.from_json``
+    validation path so field contracts are enforced identically.
+
+Only the Python standard library is required (no PyYAML dependency) for the
+emit path.  ``schema_from_yaml`` requires PyYAML (already listed as a project
+dependency in ``pyproject.toml``).
 """
 
 from __future__ import annotations
 
+import datetime as _dt
+import json
+import os
 import pathlib
+import re
+import warnings
 from typing import Any
 
-from arnio.schema import _field_to_dict
+from arnio.schema import Schema, _field_to_dict
 
 _INDENT = "  "
+
+# Matches ISO date and datetime strings that YAML 1.1 resolves as timestamps.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}([ T]\d{2}:\d{2}(:\d{2})?.*)?$")
 
 # Types that arnio's Schema / scan_csv can legitimately produce.
 _SCALAR_TYPES = (str, int, float, bool, type(None))
@@ -47,10 +59,19 @@ def _emit_scalar(value: Any) -> str:
             return "-.inf"
         return repr(value)
     if isinstance(value, str):
+        looks_numeric = False
+        try:
+            float(value)
+            looks_numeric = True
+        except ValueError:
+            pass
+
         # Quote strings that would be misread as YAML scalars or are empty.
         needs_quoting = (
             not value
+            or looks_numeric
             or value.lower() in {"true", "false", "null", "yes", "no", "on", "off"}
+            or bool(_DATE_RE.match(value))
             or any(c in value for c in ("\n", "\r"))
             or value[0]
             in (
@@ -90,13 +111,11 @@ def _emit_scalar(value: Any) -> str:
     raise TypeError(f"Unsupported scalar type: {type(value)!r}")
 
 
+# Validate nested container values recursively.
 def _validate_serializable(value: Any) -> None:
-    if isinstance(value, _SCALAR_TYPES):
-        return
+    """Validate recursively that a value can be serialized."""
 
-    if isinstance(value, set):
-        for item in value:
-            _validate_serializable(item)
+    if isinstance(value, _SCALAR_TYPES):
         return
 
     if isinstance(value, list):
@@ -104,12 +123,55 @@ def _validate_serializable(value: Any) -> None:
             _validate_serializable(item)
         return
 
-    if isinstance(value, dict):
-        for item in value.values():
+    if isinstance(value, set):
+        for item in value:
             _validate_serializable(item)
         return
 
-    raise TypeError(f"schema_to_yaml does not support values of type {type(value)!r}.")
+    if isinstance(value, dict):
+        for k, v in value.items():
+            if not isinstance(k, str):
+                raise TypeError("schema dict keys must be strings")
+
+            _validate_serializable(v)
+
+        return
+
+    raise TypeError(
+        f"schema_to_yaml does not support values of type "
+        f"{type(value)!r}. Only str, int, float, bool, "
+        "None, list, and dict are allowed."
+    )
+
+
+# added normalize_serializable function
+def _normalize_serializable(value: Any) -> Any:
+    """Recursively normalize serialization-safe values.
+
+    - dict keys are sorted deterministically
+    - sets are converted into sorted lists
+    - tuples are converted into lists
+    - lists are normalized recursively
+    - unsupported values raise TypeError
+    """
+    # Normalize tuples to lists before validation so that tuple fields
+    # (e.g. required_if=("col", "val"), unique=("id",)) survive export.
+    if isinstance(value, tuple):
+        return [_normalize_serializable(v) for v in value]
+
+    _validate_serializable(value)
+
+    if isinstance(value, dict):
+        return {k: _normalize_serializable(v) for k, v in sorted(value.items())}
+    # Convert sets into deterministic sorted lists since YAML
+    # emission only supports list-like serialized output.
+    if isinstance(value, set):
+        return sorted(_normalize_serializable(v) for v in value)
+
+    if isinstance(value, list):
+        return [_normalize_serializable(v) for v in value]
+
+    return value
 
 
 def _emit_value(value: Any, depth: int) -> str:
@@ -169,6 +231,7 @@ def schema_to_dict(schema: dict | Any) -> dict:
         Either the raw ``dict`` returned by ``ar.scan_csv`` / ``ar.Schema``,
         or any object that exposes a ``fields`` attribute (mapping of field
         name → field descriptor) – whichever arnio uses internally.
+        Also supports ArFrame objects and lists of ColumnSummary.
 
     Returns
     -------
@@ -178,14 +241,36 @@ def schema_to_dict(schema: dict | Any) -> dict:
     Raises
     ------
     TypeError
-        If *schema* is neither a ``dict`` nor an object with a ``fields``
-        attribute.
+        If *schema* is not of a supported type.
     """
-    if isinstance(schema, dict):
-        raw: dict = schema
-    elif hasattr(schema, "fields"):
-        raw = {}
+    # ── ArFrame path ────────────────────────────────────────────────────────
+    if hasattr(schema, "schema_summary"):
+        schema = schema.schema_summary
 
+    # ── List of ColumnSummary path ──────────────────────────────────────────
+    if isinstance(schema, list):
+        normalised_list = {}
+        for entry in schema:
+            if hasattr(entry, "name") and hasattr(entry, "dtype"):
+                name = entry.name
+                normalised_list[name] = {
+                    "type": str(entry.dtype).upper(),
+                }
+                if hasattr(entry, "nullable"):
+                    normalised_list[name]["nullable"] = entry.nullable
+            elif isinstance(entry, dict) and "name" in entry and "dtype" in entry:
+                name = entry["name"]
+                normalised_list[name] = {
+                    "type": str(entry["dtype"]).upper(),
+                }
+                if "nullable" in entry:
+                    normalised_list[name]["nullable"] = entry["nullable"]
+            else:
+                raise TypeError(f"Unsupported list item type: {type(entry)!r}")
+        return {"fields": normalised_list}
+
+    # ── Schema object path ──────────────────────────────────────────────────
+    if hasattr(schema, "fields"):
         if getattr(schema, "rules", None):
             raise ValueError(
                 "schema_to_yaml does not support Schema objects with custom rules "
@@ -193,64 +278,77 @@ def schema_to_dict(schema: dict | Any) -> dict:
                 "Remove schema.rules before exporting."
             )
 
+        normalised: dict = {}
         for name, field in schema.fields.items():
             if isinstance(field, dict):
-                raw[name] = field
+                raw_field = field
             elif hasattr(field, "dtype"):
-                raw[name] = _field_to_dict(field)
+                raw_field = _field_to_dict(field)
             elif hasattr(field, "__dict__"):
-                raw[name] = {
+                raw_field = {
                     k: v for k, v in vars(field).items() if not k.startswith("_")
                 }
             else:
-                raw[name] = str(field)
+                raw_field = str(field)
 
+            if isinstance(raw_field, str):
+                normalised[name] = {"type": raw_field}
+            elif isinstance(raw_field, dict):
+                normalised[name] = _normalize_serializable(raw_field)
+            else:
+                normalised[name] = raw_field
+
+        # Build result cleanly — metadata never touches the fields namespace
+        result = {"fields": dict(sorted(normalised.items()))}
         if hasattr(schema, "strict"):
-            raw["strict"] = schema.strict
-
+            result["strict"] = schema.strict
         if hasattr(schema, "unique"):
-            raw["unique"] = schema.unique
-    else:
-        raise TypeError(
-            f"Expected a dict or an object with a 'fields' attribute, "
-            f"got {type(schema)!r}."
-        )
+            result["unique"] = schema.unique
 
-    # Normalise: if the dict values are plain strings (e.g. scan_csv output),
-    # wrap them so the YAML has a consistent nested structure.
-    normalised: dict = {}
-    metadata: dict = {}
+        return result
 
-    for field_name in sorted(raw.keys()):
-        value = raw[field_name]
-
-        if field_name in {"strict", "unique"}:
-            metadata[field_name] = value
-            continue
-
-        if isinstance(value, str):
-            normalised[field_name] = {"type": value}
-
-        elif isinstance(value, dict):
-            cleaned = {}
-
-            for k, v in sorted(value.items()):
-                if isinstance(v, set):
-                    cleaned[k] = sorted(v)
-                else:
-                    cleaned[k] = v
-
-            _validate_serializable(cleaned)
-
-            normalised[field_name] = cleaned
-
+    # ── Raw dict path ────────────────────────────────────────────────────────
+    if isinstance(schema, dict):
+        # Detect explicit structured input:
+        # {"fields": {...}, "strict": ..., "unique": ...}
+        if "fields" in schema and isinstance(schema["fields"], dict):
+            raw_fields = schema["fields"]
+            metadata = {k: v for k, v in schema.items() if k != "fields"}
         else:
-            normalised[field_name] = value
+            # Flat scan_csv-style dict:
+            # all keys are field names
+            raw_fields = schema
+            metadata = {}
 
-    result = {"fields": normalised}
-    result.update(metadata)
+        normalised = {}
 
-    return result
+        for field_name in sorted(raw_fields.keys()):
+            value = raw_fields[field_name]
+
+            # Recursively normalize nested containers
+            # into serialization-safe deterministic values.
+            if isinstance(value, str):
+                normalised[field_name] = {"type": value}
+            else:
+                normalised[field_name] = _normalize_serializable(value)
+
+        result = {"fields": normalised}
+
+        # Validate and normalize structured metadata before merging.
+        # Keys must be strings; values must be serialization-safe.
+        for meta_key, meta_val in metadata.items():
+            if not isinstance(meta_key, str):
+                raise TypeError(
+                    f"schema metadata keys must be strings, got {type(meta_key)!r}"
+                )
+            result[meta_key] = _normalize_serializable(meta_val)
+
+        return result
+
+    raise TypeError(
+        f"Expected a dict, an ArFrame, or an object with a 'fields' attribute, "
+        f"got {type(schema)!r}."
+    )
 
 
 def schema_to_yaml(
@@ -291,8 +389,171 @@ def schema_to_yaml(
     yaml_str = body if body.endswith("\n") else body + "\n"
 
     if path is not None:
+        if not isinstance(path, (str, os.PathLike)):
+            raise TypeError("path must be a string or os.PathLike")
+        if isinstance(path, str) and not path.strip():
+            raise ValueError("path must not be empty")
         target = pathlib.Path(path)
+        if target.is_dir():
+            raise ValueError("path must point to a file, not a directory")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(yaml_str, encoding="utf-8")
 
     return yaml_str
+
+
+def _normalize_yaml_payload(obj: Any) -> Any:
+    """Recursively convert YAML-native types to JSON-safe equivalents.
+
+    ``yaml.safe_load`` may produce ``datetime.date`` or ``datetime.datetime``
+    objects for timestamp-looking values (e.g. ``datetime_min: 2024-01-01``).
+    These are not JSON-serialisable by default, so we convert them to ISO
+    strings here before handing off to ``Schema.from_json``.  All other
+    types supported by ``_ALLOWED_FIELD_KEYS`` are already JSON-native.
+    """
+    if isinstance(obj, dict):
+        return {k: _normalize_yaml_payload(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_normalize_yaml_payload(item) for item in obj]
+    if isinstance(obj, _dt.datetime):
+        return obj.isoformat()
+    if isinstance(obj, _dt.date):
+        return obj.isoformat()
+    return obj
+
+
+def schema_from_yaml(source: str | os.PathLike) -> Schema:
+    """Load a Schema from a YAML file path or raw YAML string.
+
+    This is the inverse of :func:`schema_to_yaml`.  Field validation reuses
+    the existing ``Schema.from_json`` path, so the same key allowlists and
+    constraint checks apply.
+
+    Parameters
+    ----------
+    source : str or path-like
+        The input is resolved according to the following deterministic rules:
+
+        * **Path-like object** (``pathlib.Path`` or any ``os.PathLike``):
+          always treated as a file path.  ``FileNotFoundError`` is raised if
+          the file does not exist.
+        * **String without newlines**: treated as a file path.
+          ``FileNotFoundError`` is raised if the file does not exist.
+        * **String containing at least one newline**: parsed directly as raw
+          YAML text.
+
+    Returns
+    -------
+    Schema
+        Fully validated :class:`~arnio.schema.Schema` object.
+
+    Raises
+    ------
+    TypeError
+        If *source* is not a ``str`` or ``os.PathLike``.
+    FileNotFoundError
+        If *source* resolves to a file path and the file is not found.
+    ValueError
+        If the YAML is syntactically invalid or the payload contains unknown
+        schema or field keys.
+
+    Notes
+    -----
+    Cross-field ``rules`` cannot be serialized and will never appear in a
+    YAML file produced by :func:`schema_to_yaml`.  If the YAML payload
+    contains ``rules_omitted: true`` (a marker written by ``Schema.to_json``
+    when rules were present), a :class:`UserWarning` is emitted and the
+    marker is silently ignored.  Re-attach rules manually after loading.
+
+    PyYAML (``PyYAML>=6.0``) is required and is already listed as a project
+    dependency in ``pyproject.toml``.
+
+    Examples
+    --------
+    Load from a checked-in config file:
+
+    >>> schema = ar.schema_from_yaml("contracts/users.yaml")
+    >>> schema = ar.schema_from_yaml(pathlib.Path("contracts/users.yaml"))
+
+    Parse an inline YAML string (at least one newline required):
+
+    >>> yaml_text = \"\"\"
+    ... fields:
+    ...   age:
+    ...     dtype: int64
+    ...     nullable: false
+    ...   email:
+    ...     dtype: string
+    ...     semantic: email
+    ... \"\"\"
+    >>> schema = ar.schema_from_yaml(yaml_text)
+    """
+    try:
+        import yaml  # PyYAML — listed in pyproject.toml dependencies
+    except ImportError as exc:  # pragma: no cover
+        raise ImportError(
+            "schema_from_yaml requires PyYAML. "
+            "Install it with: pip install 'PyYAML>=6.0'"
+        ) from exc
+
+    if isinstance(source, os.PathLike):
+        # Always treat any path-like object as a file path.
+        path = pathlib.Path(source)
+        if not path.is_file():
+            raise FileNotFoundError(f"Schema YAML file not found: {path}")
+        text = path.read_text(encoding="utf-8")
+
+    elif isinstance(source, str):
+        if "\n" in source:
+            # String with newlines → raw YAML text.
+            text = source
+        else:
+            # String without newlines → treat as a file path.
+            path = pathlib.Path(source)
+            if not path.is_file():
+                raise FileNotFoundError(f"Schema YAML file not found: {path}")
+            text = path.read_text(encoding="utf-8")
+
+    else:
+        raise TypeError(
+            "schema_from_yaml expects a str or os.PathLike, "
+            f"got {type(source).__name__}"
+        )
+
+    # --- Parse YAML ----------------------------------------------------------
+    try:
+        payload = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise ValueError(f"Invalid schema YAML: {exc}") from exc
+
+    if payload is None:
+        raise ValueError(
+            "Schema YAML is empty. " "Expected a mapping with at least a 'fields' key."
+        )
+
+    if not isinstance(payload, dict):
+        raise TypeError(
+            "Schema YAML must decode to a mapping with 'fields', "
+            "'strict', and optional 'unique'. "
+            f"Got: {type(payload).__name__}"
+        )
+
+    # Warn about rules_omitted before delegating to from_json, mirroring the
+    # warning already present in Schema.to_json / Schema.from_json.
+    if payload.get("rules_omitted"):
+        warnings.warn(
+            "schema_from_yaml: the YAML payload contains 'rules_omitted: true', "
+            "which means cross-field rules were omitted during serialization. "
+            "Re-attach rules manually after loading.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    # --- Delegate to Schema.from_json ----------------------------------------
+    # yaml.safe_load may produce datetime.date / datetime.datetime objects for
+    # timestamp-looking values; normalise these to ISO strings so json.dumps
+    # does not raise and _parse_datetime_bound receives the expected type.
+    try:
+        return Schema.from_json(json.dumps(_normalize_yaml_payload(payload)))
+    except (ValueError, TypeError) as exc:
+        raise type(exc)(str(exc)) from exc

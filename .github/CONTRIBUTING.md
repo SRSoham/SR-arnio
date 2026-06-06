@@ -64,6 +64,21 @@ Most new features do not require touching C++! You can write a pure Python step 
 ```python
 import arnio as ar
 
+def remove_special_chars(df, subset=None):
+    cols = subset or df.select_dtypes("object").columns
+    for col in cols:
+        df[col] = df[col].str.replace(r"[^a-zA-Z0-9\s]", "", regex=True)
+    return df
+
+ar.register_step("remove_special_chars", remove_special_chars)
+```
+
+### Calling a step with custom parameters
+
+Every step must use tuple syntax — always wrap the step name in a tuple, even when no parameters are needed.
+```python
+import arnio as ar
+
 def remove_special_chars(df, columns=None):
     cols = columns or df.select_dtypes("object").columns
     for col in cols:
@@ -71,6 +86,18 @@ def remove_special_chars(df, columns=None):
     return df
 
 ar.register_step("remove_special_chars", remove_special_chars)
+
+frame = ar.read_csv("data.csv")
+
+# Without parameters — wrap step name in a single-element tuple
+result = ar.pipeline(frame, [
+    ("remove_special_chars",)
+])
+
+# With custom parameters — cleans only specified columns
+result = ar.pipeline(frame, [
+    ("remove_special_chars", {"columns": ["name", "city"]})
+])
 ```
 
 ### Contribution Testing Standard
@@ -101,7 +128,7 @@ def test_remove_special_chars(sample_csv):
 4. If you've added code that should be tested, add tests.
 5. If you've changed public behavior, update documentation or examples.
 6. Ensure the test suite passes (`make test`).
-7. Ensure your code passes linting (`make lint`). This is a required pre-PR step.
+7. Ensure your code passes linting (`make lint`). This checks docs encoding, formatting (`black`, `ruff`), types (`mypy`), and C++ styling (`clang-format`). This is a required pre-PR step.
 8. Open the pull request and link the issue with `Fixes #issue-number` when complete.
 9. Ensure your PR title follows **Conventional Commits**.
 
@@ -118,6 +145,7 @@ aligned. See [STUBS_UPDATE.md](../STUBS_UPDATE.md) for the short checklist.
 - Do not edit generated files, build output, cache folders, or local logs.
 - Be patient during review. Maintainers may ask for tests, edge cases, or a narrower scope.
 - If you stop working on an assigned issue, please comment so it can be reassigned.
+- If you need more time, comment within 3 days of assignment.
 
 ### Commit Message Convention
 We use an automated release system that relies on [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/). Your PR title must use one of the following prefixes:
@@ -129,4 +157,3 @@ We use an automated release system that relies on [Conventional Commits](https:/
 This allows our CI to automatically generate changelogs and bump version numbers.
 
 We use `black`, `ruff`, and `clang-format` to format our code. `pre-commit` will run these automatically before each commit if installed.
-

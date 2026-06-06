@@ -1,5 +1,6 @@
 #include "arnio/frame.h"
 
+#include <cmath>
 #include <stdexcept>
 
 namespace arnio {
@@ -135,6 +136,46 @@ Frame Frame::select_columns(const std::vector<std::string>& columns) const {
     return Frame(row_count_, std::move(selected));
 }
 
+Frame Frame::select_rows(size_t start, size_t count) const {
+    if (start > row_count_) {
+        throw std::out_of_range("Row start index out of range");
+    }
+
+    size_t actual_count = std::min(count, row_count_ - start);
+
+    std::vector<Column> selected_columns;
+    selected_columns.reserve(columns_.size());
+
+    for (const auto& col : columns_) {
+        Column new_col(col.name(), col.dtype());
+
+        for (size_t i = start; i < start + actual_count; ++i) {
+            if (col.is_null(i)) {
+                new_col.push_null();
+                continue;
+            }
+
+            auto value = col.at(i);
+
+            if (std::holds_alternative<std::string>(value)) {
+                new_col.push_back(std::get<std::string>(value));
+            } else if (std::holds_alternative<int64_t>(value)) {
+                new_col.push_back(std::get<int64_t>(value));
+            } else if (std::holds_alternative<double>(value)) {
+                new_col.push_back(std::get<double>(value));
+            } else if (std::holds_alternative<bool>(value)) {
+                new_col.push_back(std::get<bool>(value));
+            } else {
+                new_col.push_null();
+            }
+        }
+
+        selected_columns.push_back(std::move(new_col));
+    }
+
+    return Frame(actual_count, std::move(selected_columns));
+}
+
 void Frame::rebuild_index() {
     name_index_.clear();
     for (size_t i = 0; i < columns_.size(); ++i) {
@@ -159,6 +200,8 @@ std::vector<std::pair<std::string, std::vector<std::pair<std::string, double>>>>
             double sum = 0.0;
             double min_val = std::numeric_limits<double>::infinity();
             double max_val = -std::numeric_limits<double>::infinity();
+            size_t finite_count = 0;
+            size_t non_finite_count = 0;
 
             for (size_t i = 0; i < total_rows; ++i) {
                 if (col.is_null(i)) {
@@ -174,16 +217,22 @@ std::vector<std::pair<std::string, std::vector<std::pair<std::string, double>>>>
                     val = std::get<double>(col.at(i));
                 }
 
+                if (!std::isfinite(val)) {
+                    non_finite_count++;
+                    continue;
+                }
+
+                finite_count++;
                 sum += val;
                 if (val < min_val) min_val = val;
                 if (val > max_val) max_val = val;
             }
 
-            // Push metrics in the exact forward order requested by the maintainer
             stats.push_back({"count", static_cast<double>(valid_count)});
             stats.push_back({"nulls", static_cast<double>(null_count)});
-            if (valid_count > 0) {
-                stats.push_back({"mean", sum / valid_count});
+            stats.push_back({"non_finite", static_cast<double>(non_finite_count)});
+            if (finite_count > 0) {
+                stats.push_back({"mean", sum / finite_count});
                 stats.push_back({"min", min_val});
                 stats.push_back({"max", max_val});
             } else {
@@ -191,6 +240,33 @@ std::vector<std::pair<std::string, std::vector<std::pair<std::string, double>>>>
                 stats.push_back({"min", 0.0});
                 stats.push_back({"max", 0.0});
             }
+
+            summary.push_back({col_name, stats});
+        } else if (col.dtype() == DType::BOOL) {
+            size_t true_count = 0;
+            size_t false_count = 0;
+            const auto& values = std::get<std::vector<bool>>(col.data());
+
+            for (size_t i = 0; i < total_rows; ++i) {
+                if (col.is_null(i)) {
+                    null_count++;
+                    continue;
+                }
+                valid_count++;
+                if (values[i]) {
+                    true_count++;
+                } else {
+                    false_count++;
+                }
+            }
+
+            stats.push_back({"count", static_cast<double>(valid_count)});
+            stats.push_back({"nulls", static_cast<double>(null_count)});
+            stats.push_back({"true", static_cast<double>(true_count)});
+            stats.push_back({"false", static_cast<double>(false_count)});
+            stats.push_back({"true_ratio", valid_count > 0 ? static_cast<double>(true_count) /
+                                                                 static_cast<double>(valid_count)
+                                                           : 0.0});
 
             summary.push_back({col_name, stats});
         } else if (type_str == "string") {
