@@ -254,6 +254,24 @@ result = schema.validate(frame)</code></pre></div></div>
                 <td>Validates IANA timezone identifiers (e.g. <code>"America/New_York"</code>).</td>
               </tr>
               <tr>
+                <td><code>UUID(...)</code></td>
+                <td>Semantic</td>
+                <td><code>nullable=True</code>, <code>unique=False</code>, <code>severity="error"</code>, <code>required_if=None</code></td>
+                <td>Validates the canonical 8-4-4-4-12 hexadecimal UUID format (RFC 4122, e.g. <code>"550e8400-e29b-41d4-a716-446655440000"</code>). Both upper- and lower-case hex digits are accepted.</td>
+              </tr>
+              <tr>
+                <td><code>IPv4(...)</code></td>
+                <td>Semantic</td>
+                <td><code>nullable=True</code>, <code>unique=False</code>, <code>severity="error"</code>, <code>required_if=None</code></td>
+                <td>Validates strict dotted-decimal IPv4 addresses (e.g. <code>"192.168.1.1"</code>). Each octet must be 0&#8211;255; leading zeros are rejected.</td>
+              </tr>
+              <tr>
+                <td><code>MACAddress(...)</code></td>
+                <td>Semantic</td>
+                <td><code>nullable=True</code>, <code>unique=False</code>, <code>severity="error"</code>, <code>required_if=None</code></td>
+                <td>Validates IEEE 802 MAC-48 addresses in colon-separated (<code>"AA:BB:CC:DD:EE:FF"</code>) or hyphen-separated (<code>"AA-BB-CC-DD-EE-FF"</code>) notation.</td>
+              </tr>
+              <tr>
                 <td><code>Date(...)</code></td>
                 <td>Date / Time</td>
                 <td><code>nullable=True</code>, <code>min=None</code>, <code>max=None</code>, <code>unique=False</code>, <code>severity="error"</code>, <code>required_if=None</code></td>
