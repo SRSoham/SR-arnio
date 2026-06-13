@@ -230,7 +230,14 @@ class ArFrame:
                     "of column names to dtypes"
                 )
 
-            if value in (object, "object"):
+            if isinstance(value, np.ndarray) and value.size > 1:
+                raise TypeError(
+                    "dtype must be a string, Python type, "
+                    "NumPy/pandas dtype, or mapping "
+                    "of column names to dtypes"
+                )
+
+            if value is object or (isinstance(value, str) and value == "object"):
                 raise TypeError(
                     "dtype must be a string, Python type, "
                     "NumPy/pandas dtype, or mapping "
@@ -461,6 +468,10 @@ class ArFrame:
         >>> frame.to_dict()
         {'name': ['Alice', 'Bob'], 'age': [25, 30]}
         """
+        # STEP 1: Validate orient is strictly a string to prevent unhashable raw leaks
+        if not isinstance(orient, str):
+            raise TypeError("orient must be a string")
+
         col_names = self.columns
         num_cols = self.shape[1]
         data = {

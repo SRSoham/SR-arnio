@@ -1,10 +1,15 @@
 """Tests for data quality profiling and smart cleaning."""
 
+import datetime as dt
+import decimal
 import io
 import json
 import math
 import warnings
+from pathlib import Path
+from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -19,6 +24,240 @@ from arnio.quality import (
     _validate_gate_ratio_threshold,
     _validate_gate_threshold,
 )
+
+
+def test_data_quality_report_suggestion_kwargs_are_json_serializable():
+    report = ar.DataQualityReport(
+        row_count=1,
+        column_count=0,
+        memory_usage=0,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns={},
+        suggestions=[
+            (
+                "custom_step",
+                {
+                    "created_at": dt.datetime(2024, 1, 2, 3, 4, 5),
+                    "amount": decimal.Decimal("12.34"),
+                    "metadata": {"count": np.int64(1)},
+                    "columns": ("name", "age"),
+                    "tags": {"beta", "alpha"},
+                },
+            )
+        ],
+    )
+
+    payload = report.to_dict()
+    json.dumps(payload)
+
+    json_output = report.to_json()
+    assert isinstance(json_output, str)
+    assert json.loads(json_output) == payload
+
+    kwargs = payload["suggestions"][0]["kwargs"]
+    assert kwargs["created_at"] == "2024-01-02T03:04:05"
+    assert kwargs["amount"] == "12.34"
+    assert kwargs["metadata"] == {"count": 1}
+    assert kwargs["columns"] == ["name", "age"]
+    assert kwargs["tags"] == ["alpha", "beta"]
+
+
+def test_data_quality_report_to_json_round_trips_through_to_dict_options():
+    report = ar.profile(
+        ar.from_pandas(
+            pd.DataFrame(
+                {
+                    "name": ["Alice", "Bob"],
+                    "age": [30, 40],
+                    "secret": ["token-a", "token-b"],
+                }
+            )
+        ),
+        sample_size=2,
+    )
+
+    expected = report.to_dict(
+        redact_sample_values=True,
+        exclude_columns=["secret"],
+    )
+
+    actual = json.loads(
+        report.to_json(
+            redact_sample_values=True,
+            exclude_columns=["secret"],
+        )
+    )
+
+    assert actual == expected
+
+
+def test_data_quality_report_suggestion_kwargs_stringifies_unsupported_leaf():
+
+    report = ar.DataQualityReport(
+        row_count=1,
+        column_count=0,
+        memory_usage=0,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns={},
+        suggestions=[
+            (
+                "custom_step",
+                {
+                    "path": Path("data/input.csv"),
+                    "nested": {"complex": complex(1, 2)},
+                },
+            )
+        ],
+    )
+
+    payload = report.to_dict()
+    json.dumps(payload)
+
+    kwargs = payload["suggestions"][0]["kwargs"]
+    assert kwargs["path"] == str(Path("data/input.csv"))
+    assert kwargs["nested"]["complex"] == "(1+2j)"
+    assert json.loads(report.to_json()) == payload
+
+
+def test_data_quality_report_suggestion_kwargs_normalizes_frozenset():
+    report = ar.DataQualityReport(
+        row_count=1,
+        column_count=0,
+        memory_usage=0,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns={},
+        suggestions=[
+            (
+                "custom_step",
+                {
+                    "values": frozenset(["beta", "alpha"]),
+                    "nested": {
+                        "ids": frozenset([np.int64(2), np.int64(1)]),
+                    },
+                },
+            )
+        ],
+    )
+
+    payload = report.to_dict()
+    json.dumps(payload)
+
+    kwargs = payload["suggestions"][0]["kwargs"]
+
+    assert kwargs["values"] == ["alpha", "beta"]
+    assert kwargs["nested"]["ids"] == [1, 2]
+
+
+def test_data_quality_report_suggestion_kwargs_normalizes_frozenset_nested_values():
+    report = ar.DataQualityReport(
+        row_count=1,
+        column_count=0,
+        memory_usage=0,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns={},
+        suggestions=[
+            (
+                "custom_step",
+                {
+                    "values": frozenset(["beta", "alpha"]),
+                    "nested": {
+                        "values": frozenset([np.int64(2), np.int64(1)]),
+                    },
+                },
+            )
+        ],
+    )
+
+    payload = report.to_dict()
+    json.dumps(payload)
+
+    kwargs = payload["suggestions"][0]["kwargs"]
+    assert kwargs["values"] == ["alpha", "beta"]
+    assert kwargs["nested"]["values"] == [1, 2]
+    assert json.loads(report.to_json()) == payload
+
+
+def test_data_quality_report_suggestion_kwargs_recurses_numpy_item_result():
+    report = ar.DataQualityReport(
+        row_count=1,
+        column_count=0,
+        memory_usage=0,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns={},
+        suggestions=[
+            (
+                "custom_step",
+                {
+                    "timestamp": np.datetime64("2024-01-02T03:04:05"),
+                    "non_finite": np.float64(float("inf")),
+                },
+            )
+        ],
+    )
+
+    payload = report.to_dict()
+    json.dumps(payload)
+
+    kwargs = payload["suggestions"][0]["kwargs"]
+    assert kwargs["timestamp"].startswith("2024-01-02")
+    assert kwargs["non_finite"] is None
+    assert json.loads(report.to_json()) == payload
+
+
+def test_data_quality_report_to_dict_normalizes_suggestions_after_exclusions():
+    columns = ar.profile(
+        ar.from_pandas(
+            pd.DataFrame(
+                {
+                    "name": [" Alice ", "Bob"],
+                    "secret": ["token-a", "token-b"],
+                }
+            )
+        )
+    ).columns
+
+    report = ar.DataQualityReport(
+        row_count=2,
+        column_count=2,
+        memory_usage=100,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        columns=columns,
+        suggestions=[
+            (
+                "custom_step",
+                {
+                    "subset": np.array(["name", "secret"]),
+                    "columns": ("name", "secret"),
+                    "cast_types": {
+                        "name": np.str_("string"),
+                        "secret": np.str_("string"),
+                    },
+                    "metadata": {"kept_count": np.int64(1)},
+                },
+            )
+        ],
+    )
+
+    result = report.to_dict(
+        redact_sample_values=True,
+        exclude_columns=["secret"],
+    )
+    json.dumps(result)
+
+    kwargs = result["suggestions"][0]["kwargs"]
+
+    assert kwargs["subset"] == ["name"]
+    assert kwargs["columns"] == ["name"]
+    assert kwargs["cast_types"] == {"name": "string"}
+    assert kwargs["metadata"] == {"kept_count": 1}
+    assert "secret" not in json.dumps(result)
+    assert result["columns"]["name"]["sample_values"] == ["[REDACTED]", "[REDACTED]"]
 
 
 def test_profile_reports_quality_signals(tmp_path):
@@ -1842,6 +2081,118 @@ def test_report_to_markdown_redacts_unquoted_confidence_reason():
 
     assert "ssn" not in md
     assert "[REDACTED]" in md
+
+
+def test_report_to_markdown_redacts_punctuation_confidence_reason():
+    report = ar.DataQualityReport(
+        row_count=1,
+        column_count=3,
+        memory_usage=64,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        quality_score=100.0,
+        score_components={},
+        columns={
+            "#secret": ar.ColumnProfile(
+                name="#secret",
+                dtype="string",
+                semantic_type="identifier",
+                row_count=1,
+                null_count=0,
+                null_ratio=0.0,
+                unique_count=1,
+                unique_ratio=1.0,
+                warnings=[],
+            ),
+            "[secret]": ar.ColumnProfile(
+                name="[secret]",
+                dtype="string",
+                semantic_type="identifier",
+                row_count=1,
+                null_count=0,
+                null_ratio=0.0,
+                unique_count=1,
+                unique_ratio=1.0,
+                warnings=[],
+            ),
+            "secret?": ar.ColumnProfile(
+                name="secret?",
+                dtype="string",
+                semantic_type="identifier",
+                row_count=1,
+                null_count=0,
+                null_ratio=0.0,
+                unique_count=1,
+                unique_ratio=1.0,
+                warnings=[],
+            ),
+        },
+        suggestions=[
+            ar.CleaningSuggestion(
+                "example",
+                {"column": "#secret"},
+                0.90,
+                "Column #secret contains whitespace",
+            ),
+            ar.CleaningSuggestion(
+                "example",
+                {"column": "[secret]"},
+                0.90,
+                "Column [secret] contains whitespace",
+            ),
+            ar.CleaningSuggestion(
+                "example",
+                {"column": "secret?"},
+                0.90,
+                "Column secret? contains whitespace",
+            ),
+        ],
+    )
+
+    md = report.to_markdown(exclude_columns=["#secret", "[secret]", "secret?"])
+
+    assert "#secret" not in md
+    assert "[secret]" not in md
+    assert "secret?" not in md
+    assert md.count("[REDACTED]") >= 3
+
+
+def test_report_to_markdown_redacts_short_name_without_substring_replacement():
+    report = ar.DataQualityReport(
+        row_count=1,
+        column_count=1,
+        memory_usage=64,
+        duplicate_rows=0,
+        duplicate_ratio=0.0,
+        quality_score=100.0,
+        score_components={},
+        columns={
+            "id": ar.ColumnProfile(
+                name="id",
+                dtype="string",
+                semantic_type="identifier",
+                row_count=1,
+                null_count=0,
+                null_ratio=0.0,
+                unique_count=1,
+                unique_ratio=1.0,
+                warnings=[],
+            ),
+        },
+        suggestions=[
+            ar.CleaningSuggestion(
+                "example",
+                {"column": "id"},
+                0.90,
+                "Candidate id is missing",
+            )
+        ],
+    )
+
+    md = report.to_markdown(exclude_columns=["id"])
+
+    assert "Candidate [REDACTED] is missing" in md
+    assert "Cand[REDACTED]ate" not in md
 
 
 def test_report_to_markdown_filters_tuple_and_set_suggestion_columns():
@@ -3927,6 +4278,77 @@ def test_profile_comparison_to_markdown_invalid_output_raises():
     comparison = ar.compare_profiles(p, p)
     with pytest.raises(TypeError, match="writable text stream"):
         comparison.to_markdown(output=42)
+
+
+def test_profile_comparison_to_markdown_exclude_columns_filters_drift_rows():
+    left = ar.profile(
+        ar.from_pandas(pd.DataFrame({"ssn": ["123-45-6789"], "age": [30]}))
+    )
+    right = ar.profile(
+        ar.from_pandas(pd.DataFrame({"ssn": ["987-65-4321"], "age": [31]}))
+    )
+    comparison = ar.compare_profiles(left, right)
+
+    markdown = comparison.to_markdown(exclude_columns=["ssn"])
+
+    assert "| ssn |" not in markdown
+    assert "| age |" in markdown
+
+
+@pytest.mark.parametrize("exclude_columns", [{"ssn"}, ("ssn",)])
+def test_profile_comparison_to_markdown_accepts_set_and_tuple_exclude_columns(
+    exclude_columns,
+):
+    frame = ar.from_pandas(pd.DataFrame({"ssn": ["123-45-6789"], "age": [30]}))
+    profile = ar.profile(frame)
+    comparison = ar.compare_profiles(profile, profile)
+
+    markdown = comparison.to_markdown(exclude_columns=exclude_columns)
+
+    assert "| ssn |" not in markdown
+    assert "| age |" in markdown
+
+
+def test_profile_comparison_to_markdown_exclude_columns_unknown_raises_keyerror():
+    frame = ar.from_pandas(pd.DataFrame({"age": [30]}))
+    profile = ar.profile(frame)
+    comparison = ar.compare_profiles(profile, profile)
+
+    with pytest.raises(KeyError, match="Unknown exclude_columns"):
+        comparison.to_markdown(exclude_columns=["missing"])
+
+
+def test_profile_comparison_to_markdown_exclude_columns_invalid_type_raises():
+    invalid_exclude_columns: Any = "ssn"
+    frame = ar.from_pandas(pd.DataFrame({"ssn": ["123-45-6789"]}))
+    profile = ar.profile(frame)
+    comparison = ar.compare_profiles(profile, profile)
+
+    with pytest.raises(TypeError, match="exclude_columns must be a list"):
+        comparison.to_markdown(exclude_columns=invalid_exclude_columns)
+
+
+def test_profile_comparison_to_markdown_exclude_columns_invalid_entries_raise():
+    invalid_exclude_columns: Any = ["ssn", 123]
+    frame = ar.from_pandas(pd.DataFrame({"ssn": ["123-45-6789"]}))
+    profile = ar.profile(frame)
+    comparison = ar.compare_profiles(profile, profile)
+
+    with pytest.raises(TypeError, match="exclude_columns must contain only string"):
+        comparison.to_markdown(exclude_columns=invalid_exclude_columns)
+
+
+def test_profile_comparison_to_markdown_output_stream_respects_exclude_columns():
+    frame = ar.from_pandas(pd.DataFrame({"ssn": ["123-45-6789"], "age": [30]}))
+    profile = ar.profile(frame)
+    comparison = ar.compare_profiles(profile, profile)
+    buffer = io.StringIO()
+
+    result = comparison.to_markdown(output=buffer, exclude_columns=["ssn"])
+
+    assert result is None
+    assert "| ssn |" not in buffer.getvalue()
+    assert "| age |" in buffer.getvalue()
 
 
 # --- Tests for QualityGateResult.to_json() ---

@@ -309,6 +309,32 @@ class TestWinsorizeOutliers:
         with pytest.raises(ValueError):
             ar.winsorize_outliers(frame, lower=lower, upper=upper)
 
+    def test_winsorize_outliers_rejects_boolean_bounds(self):
+        frame = ar.from_pandas(pd.DataFrame({"value": [1, 2, 3]}))
+
+        with pytest.raises(TypeError, match="'lower' must be an int or float"):
+            ar.winsorize_outliers(frame, lower=True)
+
+        with pytest.raises(TypeError, match="'upper' must be an int or float"):
+            ar.winsorize_outliers(frame, upper=False)
+
+    @pytest.mark.parametrize("value", ["0.1", None, object()])
+    def test_winsorize_outliers_rejects_non_numeric_bounds(self, value):
+        frame = ar.from_pandas(pd.DataFrame({"value": [1, 2, 3]}))
+
+        with pytest.raises(TypeError, match="'lower' must be an int or float"):
+            ar.winsorize_outliers(frame, lower=value)
+
+    @pytest.mark.parametrize(
+        "value",
+        [float("nan"), float("inf"), float("-inf")],
+    )
+    def test_winsorize_outliers_rejects_non_finite_bounds(self, value):
+        frame = ar.from_pandas(pd.DataFrame({"value": [1, 2, 3]}))
+
+        with pytest.raises(ValueError, match="finite"):
+            ar.winsorize_outliers(frame, lower=value)
+
     def test_winsorize_outliers_identical_values_noop(self):
         frame = ar.from_pandas(pd.DataFrame({"value": [5, 5, 5]}))
 
@@ -889,6 +915,44 @@ class TestDropColumns:
                     ("drop_columns", {"columns": ["id", "name"]}),
                 ],
             )
+
+
+class TestDropEmptyColumnsPipeline:
+    def test_drop_empty_columns_all_empty(self, csv_with_empty_columns):
+        frame = ar.read_csv(csv_with_empty_columns)
+        result = ar.drop_empty_columns(frame)
+        assert "empty_num" not in result.columns
+        assert "empty_text" not in result.columns
+        assert "name" in result.columns
+        assert "age" in result.columns
+
+    def test_drop_empty_columns_no_empty(self, sample_csv):
+        frame = ar.read_csv(sample_csv)
+        result = ar.drop_empty_columns(frame)
+        assert result.columns == frame.columns
+        assert result.shape == frame.shape
+
+    def test_drop_empty_columns_partially_empty(self, tmp_path):
+        path = tmp_path / "mixed.csv"
+        path.write_text("id,value,mixed\n1,10,\n2,20,data\n3,30,\n")
+        frame = ar.read_csv(path)
+        result = ar.drop_empty_columns(frame)
+        assert "mixed" in result.columns
+
+    def test_drop_empty_columns_pipeline(self, csv_with_empty_columns):
+        frame = ar.read_csv(csv_with_empty_columns)
+        result = ar.pipeline(
+            frame,
+            [("drop_empty_columns",)],
+        )
+        assert "empty_num" not in result.columns
+        assert "empty_text" not in result.columns
+
+    def test_drop_empty_columns_empty_frame(self):
+        frame = ar.from_pandas(pd.DataFrame(columns=["a", "b", "c"]))
+        result = ar.drop_empty_columns(frame)
+        assert result.columns == ["a", "b", "c"]
+        assert result.shape == frame.shape
 
 
 class TestDropConstantColumns:
@@ -1945,6 +2009,123 @@ class TestNormalizeUnicode:
         # attrs deepcopy check on zero-column path
         result_3_0_attrs._attrs["key"] = "mutated"
         assert frame_3_0_attrs._attrs["key"] == "value"
+
+
+class TestAttrsPreservation:
+    """Native cleaning wrappers must carry over ArFrame._attrs via deep copy."""
+
+    def _base_frame(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {"name": [" Alice ", " Bob "], "age": [20, 30], "score": [1.5, 2.5]}
+        )
+        frame = ar.from_pandas(df)
+        frame._attrs = {"source": "crm", "meta": {"version": 1}}
+        return frame
+
+    @pytest.mark.parametrize(
+        "op_name, fn",
+        [
+            ("drop_nulls", lambda f: ar.drop_nulls(f)),
+            ("fill_nulls", lambda f: ar.fill_nulls(f, 0)),
+            ("drop_duplicates", lambda f: ar.drop_duplicates(f)),
+            ("strip_whitespace", lambda f: ar.strip_whitespace(f)),
+            (
+                "normalize_case",
+                lambda f: ar.normalize_case(f, subset=["name"], case_type="lower"),
+            ),
+            (
+                "clip_numeric",
+                lambda f: ar.clip_numeric(f, subset=["age"], lower=0, upper=99),
+            ),
+            ("rename_columns", lambda f: ar.rename_columns(f, {"score": "score2"})),
+            ("trim_column_names", lambda f: ar.trim_column_names(f)),
+            ("cast_types", lambda f: ar.cast_types(f, {"age": "float64"})),
+            ("normalize_unicode", lambda f: ar.normalize_unicode(f, subset=["name"])),
+        ],
+    )
+    def test_attrs_propagated(self, op_name, fn):
+        frame = self._base_frame()
+        result = fn(frame)
+        assert result._attrs == {
+            "source": "crm",
+            "meta": {"version": 1},
+        }, f"{op_name} dropped _attrs"
+
+    @pytest.mark.parametrize(
+        "op_name, fn",
+        [
+            ("drop_nulls", lambda f: ar.drop_nulls(f)),
+            ("fill_nulls", lambda f: ar.fill_nulls(f, 0)),
+            ("drop_duplicates", lambda f: ar.drop_duplicates(f)),
+            ("strip_whitespace", lambda f: ar.strip_whitespace(f)),
+            (
+                "normalize_case",
+                lambda f: ar.normalize_case(f, subset=["name"], case_type="lower"),
+            ),
+            (
+                "clip_numeric",
+                lambda f: ar.clip_numeric(f, subset=["age"], lower=0, upper=99),
+            ),
+            ("rename_columns", lambda f: ar.rename_columns(f, {"score": "score2"})),
+            ("trim_column_names", lambda f: ar.trim_column_names(f)),
+            ("cast_types", lambda f: ar.cast_types(f, {"age": "float64"})),
+            ("normalize_unicode", lambda f: ar.normalize_unicode(f, subset=["name"])),
+        ],
+    )
+    def test_attrs_deep_copy_isolated(self, op_name, fn):
+        frame = self._base_frame()
+        result = fn(frame)
+        result._attrs["meta"]["version"] = 999
+        assert (
+            frame._attrs["meta"]["version"] == 1
+        ), f"{op_name} shared _attrs by reference instead of deep copying"
+
+    def test_drop_duplicates_zero_columns_preserves_attrs(self):
+        """drop_duplicates zero-column early return must propagate attrs."""
+        import pandas as pd
+
+        from arnio._core import _Frame
+
+        frame = ar.from_pandas(pd.DataFrame({"a": [1, 2, 3]}))
+        # Build a genuine zero-column frame with rows intact
+        frame._frame = _Frame.from_dict({}, {}, 3)
+        frame._attrs = {"source": "crm", "meta": {"version": 1}}
+        assert frame.shape == (3, 0)
+
+        result = ar.drop_duplicates(frame)
+
+        assert result._attrs == {
+            "source": "crm",
+            "meta": {"version": 1},
+        }, "drop_duplicates zero-column path dropped _attrs"
+
+    def test_drop_duplicates_zero_columns_attrs_deep_copy_isolated(self):
+        """drop_duplicates zero-column result attrs must be a deep copy."""
+        import pandas as pd
+
+        from arnio._core import _Frame
+
+        frame = ar.from_pandas(pd.DataFrame({"a": [1, 2, 3]}))
+        frame._frame = _Frame.from_dict({}, {}, 3)
+        frame._attrs = {"source": "crm", "meta": {"version": 1}}
+
+        result = ar.drop_duplicates(frame)
+        result._attrs["meta"]["version"] = 999
+
+        assert (
+            frame._attrs["meta"]["version"] == 1
+        ), "drop_duplicates zero-column path shared _attrs by reference instead of deep copying"
+
+    def test_empty_attrs_not_propagated(self):
+        """When source frame has no attrs, result attrs should also be empty."""
+        frame = ar.from_pandas(
+            __import__("pandas").DataFrame({"name": ["Alice"], "age": [20]})
+        )
+        assert frame._attrs == {}
+        result = ar.strip_whitespace(frame)
+        assert result._attrs == {}
 
 
 class TestParseBoolStrings:
@@ -3499,6 +3680,35 @@ class TestCombineColumns:
         assert pd.isna(result_df["combined"]).iloc[0]
         assert result_df["combined"].iloc[1] == "hello world"
 
+    def test_combine_columns_mixed_null_and_non_null_columns(self):
+        import pandas as pd
+
+        df = pd.DataFrame(
+            {
+                "a": ["hello", None, "foo", None],
+                "b": [None, "world", "bar", None],
+            }
+        )
+
+        frame = ar.from_pandas(df)
+
+        result = ar.combine_columns(
+            frame,
+            subset=["a", "b"],
+            separator=" ",
+            output_column="combined",
+        )
+
+        result_df = ar.to_pandas(result)
+
+        assert result_df["combined"].iloc[0] == "hello "
+        assert result_df["combined"].iloc[1] == " world"
+        assert result_df["combined"].iloc[2] == "foo bar"
+        assert pd.isna(result_df["combined"].iloc[3])
+
+        # dtype contract
+        assert str(result_df["combined"].dtype) == "string"
+
     def test_missing_subset_column_raises(self):
         import pandas as pd
 
@@ -4720,6 +4930,66 @@ class TestCleanColumnNames:
         result = ar.pipeline(frame, [("clean_column_names", {"case_type": "upper"})])
         assert to_pandas(result).columns.tolist() == ["MY_NAME", "AGE"]
 
+    def test_clean_column_names_case_type_title(self):
+        df = pd.DataFrame({"My-NaMe!!": [1]})
+        frame = from_pandas(df)
+        result = ar.clean_column_names(frame, case_type="title")
+        assert to_pandas(result).columns.tolist() == ["My_Name"]
+
+    def test_clean_column_names_case_type_camel(self):
+        df = pd.DataFrame({"My-Name!!": [1]})
+        frame = from_pandas(df)
+        result = ar.clean_column_names(frame, case_type="camel")
+        assert to_pandas(result).columns.tolist() == ["myName"]
+
+    def test_clean_column_names_case_type_title_acronyms(self):
+        df = pd.DataFrame({"HTTP_status": [1]})
+        frame = from_pandas(df)
+        result = ar.clean_column_names(frame, case_type="title")
+        assert to_pandas(result).columns.tolist() == ["Http_Status"]
+
+    def test_clean_column_names_case_type_camel_acronyms(self):
+        df = pd.DataFrame({"HTTP_status": [1]})
+        frame = from_pandas(df)
+        result = ar.clean_column_names(frame, case_type="camel")
+        assert to_pandas(result).columns.tolist() == ["httpStatus"]
+
+    def test_clean_column_names_case_type_title_leading_digits(self):
+        df = pd.DataFrame({"123_status": [1]})
+        frame = from_pandas(df)
+        result = ar.clean_column_names(frame, case_type="title")
+        assert to_pandas(result).columns.tolist() == ["123_Status"]
+
+    def test_clean_column_names_case_type_camel_leading_digits(self):
+        df = pd.DataFrame({"123_status": [1]})
+        frame = from_pandas(df)
+        result = ar.clean_column_names(frame, case_type="camel")
+        assert to_pandas(result).columns.tolist() == ["123Status"]
+
+    def test_clean_column_names_title_pipeline(self):
+        df = pd.DataFrame({"My-Name!!": [1], "age##": [2]})
+        frame = from_pandas(df)
+        result = ar.pipeline(frame, [("clean_column_names", {"case_type": "title"})])
+        assert to_pandas(result).columns.tolist() == ["My_Name", "Age"]
+
+    def test_clean_column_names_camel_pipeline(self):
+        df = pd.DataFrame({"My-Name!!": [1], "age##": [2]})
+        frame = from_pandas(df)
+        result = ar.pipeline(frame, [("clean_column_names", {"case_type": "camel"})])
+        assert to_pandas(result).columns.tolist() == ["myName", "age"]
+
+    def test_clean_column_names_title_duplicate_raises(self):
+        df = pd.DataFrame({"My_Name": [1], "my_name": [2]})
+        frame = from_pandas(df)
+        with pytest.raises(ValueError, match="duplicates"):
+            ar.clean_column_names(frame, case_type="title")
+
+    def test_clean_column_names_camel_duplicate_raises(self):
+        df = pd.DataFrame({"My_Name": [1], "my_name": [2]})
+        frame = from_pandas(df)
+        with pytest.raises(ValueError, match="duplicates"):
+            ar.clean_column_names(frame, case_type="camel")
+
 
 class TestSlugifyColumnNames:
     def test_spaces_become_underscores(self):
@@ -4756,6 +5026,13 @@ class TestSlugifyColumnNames:
         frame = ar.from_pandas(pd.DataFrame({"a": [1]}))
         with pytest.raises(ValueError):
             ar.slugify_column_names(frame, on_duplicates="ignore")
+
+    @pytest.mark.parametrize("frame", [None, [], {"a": [1]}])
+    def test_non_frame_input_raises_typeerror(self, frame):
+        with pytest.raises(
+            TypeError, match="frame must be an ArFrame or pandas.DataFrame"
+        ):
+            ar.slugify_column_names(frame)
 
 
 class TestRenameColumnsMatching:
@@ -5204,3 +5481,125 @@ class TestFillNullsFloat64LocaleIndependent:
                 ar.fill_nulls(frame, "inf", subset=["x"])
         finally:
             _locale.setlocale(_locale.LC_NUMERIC, prev)
+
+
+class TestHashColumns:
+    """Tests for ar.hash_columns (pure-Python / hashlib implementation)."""
+
+    def _frame(self):
+        return ar.from_pandas(
+            pd.DataFrame(
+                {
+                    "email": ["user@example.com", None, ""],
+                    "user_id": ["abc123", "xyz999", "def456"],
+                    "age": [30, 25, 40],
+                }
+            )
+        )
+
+    def test_sha256_produces_64_char_hex(self):
+        frame = self._frame()
+        result = ar.hash_columns(frame, subset=["email"])
+        df = ar.to_pandas(result)
+        digest = df["email"].iloc[0]
+        assert len(digest) == 64
+        assert all(c in "0123456789abcdef" for c in digest)
+
+    def test_sha256_known_answer(self):
+        import hashlib
+
+        frame = self._frame()
+        result = ar.hash_columns(frame, subset=["email"])
+        df = ar.to_pandas(result)
+        assert df["email"].iloc[0] == hashlib.sha256(b"user@example.com").hexdigest()
+
+    def test_sha256_empty_string_is_hashed_not_null(self):
+        import hashlib
+
+        frame = self._frame()
+        result = ar.hash_columns(frame, subset=["email"])
+        df = ar.to_pandas(result)
+        assert df["email"].iloc[2] == hashlib.sha256(b"").hexdigest()
+
+    def test_null_cells_preserved(self):
+        frame = self._frame()
+        result = ar.hash_columns(frame, subset=["email"])
+        df = ar.to_pandas(result)
+        assert pd.isna(df["email"].iloc[1])
+
+    def test_non_subset_columns_unchanged(self):
+        frame = self._frame()
+        result = ar.hash_columns(frame, subset=["email"])
+        df = ar.to_pandas(result)
+        assert df["user_id"].iloc[0] == "abc123"
+        assert df["age"].iloc[0] == 30
+
+    def test_md5_produces_32_char_hex(self):
+        import hashlib
+
+        frame = self._frame()
+        result = ar.hash_columns(frame, subset=["user_id"], algorithm="md5")
+        df = ar.to_pandas(result)
+        digest = df["user_id"].iloc[0]
+        assert len(digest) == 32
+        assert all(c in "0123456789abcdef" for c in digest)
+        assert digest == hashlib.md5(b"abc123").hexdigest()
+
+    def test_multiple_subset_columns(self):
+        import hashlib
+
+        frame = self._frame()
+        result = ar.hash_columns(frame, subset=["email", "user_id"])
+        df = ar.to_pandas(result)
+        assert df["email"].iloc[0] == hashlib.sha256(b"user@example.com").hexdigest()
+        assert df["user_id"].iloc[0] == hashlib.sha256(b"abc123").hexdigest()
+
+    def test_missing_column_raises_value_error(self):
+        frame = self._frame()
+        with pytest.raises(ValueError, match="not found"):
+            ar.hash_columns(frame, subset=["nonexistent"])
+
+    def test_non_string_column_raises_type_error(self):
+        frame = self._frame()
+        with pytest.raises(TypeError, match="string"):
+            ar.hash_columns(frame, subset=["age"])
+
+    def test_empty_subset_raises_value_error(self):
+        frame = self._frame()
+        with pytest.raises(ValueError, match="non-empty"):
+            ar.hash_columns(frame, subset=[])
+
+    def test_unsupported_algorithm_raises_value_error(self):
+        frame = self._frame()
+        with pytest.raises(ValueError, match="algorithm"):
+            ar.hash_columns(frame, subset=["email"], algorithm="sha512")
+
+    def test_pipeline_step(self):
+        import hashlib
+
+        frame = self._frame()
+        result = ar.pipeline(
+            frame,
+            [("hash_columns", {"subset": ["email", "user_id"], "algorithm": "sha256"})],
+        )
+        df = ar.to_pandas(result)
+        assert df["email"].iloc[0] == hashlib.sha256(b"user@example.com").hexdigest()
+
+    def test_pipeline_step_default_algorithm(self):
+        import hashlib
+
+        frame = self._frame()
+        result = ar.pipeline(frame, [("hash_columns", {"subset": ["user_id"]})])
+        df = ar.to_pandas(result)
+        assert df["user_id"].iloc[0] == hashlib.sha256(b"abc123").hexdigest()
+
+    def test_input_frame_is_not_mutated(self):
+
+        frame = self._frame()
+        df_before = ar.to_pandas(frame).copy()
+        ar.hash_columns(frame, subset=["email", "user_id"])
+        df_after = ar.to_pandas(frame)
+        # Original frame must be byte-for-byte identical after the call
+        assert df_after["email"].iloc[0] == df_before["email"].iloc[0]
+        assert df_after["user_id"].iloc[0] == df_before["user_id"].iloc[0]
+        assert pd.isna(df_after["email"].iloc[1]) == pd.isna(df_before["email"].iloc[1])

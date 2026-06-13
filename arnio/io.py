@@ -9,6 +9,7 @@ import codecs
 import io
 import json
 import os
+import re as _re
 import shutil
 import tempfile
 import urllib.error
@@ -152,7 +153,10 @@ def _utf8_csv_path(
         raise ValueError(f"Unknown encoding: {encoding}") from e
     except UnicodeDecodeError as e:
         raise CsvReadError(
-            f"Could not decode {path!r} using encoding {encoding!r}"
+            f"Could not decode {path!r} using encoding {encoding!r}: "
+            f"invalid byte(s) at position {e.start} "
+            f"(byte value: 0x{e.object[e.start]:02x}). "
+            f"Try a different encoding or use encoding_errors='replace'."
         ) from e
     except OSError as e:
         _raise_csv_path_os_error(path, e)
@@ -668,6 +672,195 @@ def _validate_encoding_errors(value: str) -> str:
     return value
 
 
+def _enrich_row_width_error(exc: Exception, delimiter: str) -> CsvReadError:
+    """Re-raise a confirmed C++ row-width error with richer Python-layer context.
+
+    The C++ backend emits messages matching:
+        "CSV row <N> has <actual> fields; expected <expected>"
+
+    Only messages that match that exact pattern are enriched; all other
+    exceptions are converted to CsvReadError with the original message intact,
+    preserving established exception behavior for unrelated failures.
+    """
+    msg = str(exc)
+    m = _re.search(
+        r"[Cc][Ss][Vv] row (\d+) has (\d+) fields?;?\s*expected (\d+)",
+        msg,
+    )
+    if m:
+        row_num = int(m.group(1))
+        actual = int(m.group(2))
+        expected = int(m.group(3))
+        direction = (
+            f"too many fields ({actual} found, {expected} expected)"
+            if actual > expected
+            else f"too few fields ({actual} found, {expected} expected)"
+        )
+        enriched = (
+            f"Malformed CSV: row {row_num} has {direction}. "
+            f"To skip bad rows silently use on_bad_lines='skip', or "
+            f"on_bad_lines='warn' to collect them. "
+            f"For rows with missing trailing fields, try mode='permissive'. "
+            f"({msg})"
+        )
+        return CsvReadError(enriched)
+    # Not a row-width message — preserve the original text exactly.
+    return CsvReadError(msg)
+
+
+def _enrich_csv_runtime_error(
+    exc: RuntimeError, path: str, encoding: str, delimiter: str
+) -> CsvReadError:
+    """Add path/encoding context to selected native CSV errors."""
+
+    msg = str(exc)
+    # Native CSV parsing currently reports malformed UTF-8 using the message below.
+    # We match it here so we can attach file path and encoding context at the Python API boundary.
+    # If the native wording changes, this enrichment may need updating.
+
+    if "Invalid UTF-8 sequence encountered" in msg:
+        return CsvReadError(
+            f"Could not read CSV file {path} using encoding " f"{encoding}: {msg}"
+        )
+
+    return _enrich_row_width_error(exc, delimiter)
+
+
+# Candidate delimiters to probe during delimiter-mismatch detection.
+# Checked only when the parse produced exactly one column, which is the
+# signature of a delimiter mismatch.
+_MISMATCH_PROBE_DELIMITERS = {",", ";", "\t", "|"}
+
+
+def _read_logical_records(path: str, max_records: int = 2) -> list[str]:
+    """Read up to *max_records* logical CSV records from *path*.
+
+    Quote state is preserved across physical newlines so that a field like
+    ``"Alice\\nSmith"`` is correctly treated as part of the same record rather
+    than split into two separate lines.  Each returned string is the raw text
+    of one complete logical record (everything up to and including the closing
+    quote of any spanning field, then up to the next unquoted newline).
+
+    Only the minimum bytes needed are read, so this is O(1) in file size.
+    """
+    records: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+
+    try:
+        with open(path, encoding="utf-8", errors="replace", newline="") as fh:
+            for raw_line in fh:
+                # Count how many quotes are on this physical line to update
+                # in_quotes state, carrying it across newlines.
+                i = 0
+                n = len(raw_line)
+                while i < n:
+                    c = raw_line[i]
+                    if c == '"':
+                        if in_quotes:
+                            # Doubled-quote escape: "" inside a quoted field.
+                            if i + 1 < n and raw_line[i + 1] == '"':
+                                i += 2
+                                continue
+                            in_quotes = False
+                        else:
+                            in_quotes = True
+                    i += 1
+
+                current.append(raw_line.rstrip("\r\n"))
+
+                if not in_quotes:
+                    # Quote state closed — this physical line ends a logical record.
+                    record = " ".join(current).strip()
+                    if record:
+                        records.append(record)
+                        current = []
+                        if len(records) >= max_records:
+                            break
+    except OSError:
+        pass
+
+    return records
+
+
+def _count_unquoted_in_record(record: str, char: str) -> int:
+    """Count occurrences of *char* outside RFC-4180 quoted fields in *record*.
+
+    *record* is the text of a complete logical CSV record (quote state is
+    already resolved across newlines by ``_read_logical_records``).  Handles
+    doubled-quote escapes (``""``) correctly.
+    """
+    count = 0
+    in_quotes = False
+    i = 0
+    n = len(record)
+    while i < n:
+        c = record[i]
+        if c == '"':
+            if in_quotes:
+                if i + 1 < n and record[i + 1] == '"':
+                    i += 2
+                    continue
+                in_quotes = False
+            else:
+                in_quotes = True
+        elif not in_quotes and c == char:
+            count += 1
+        i += 1
+    return count
+
+
+def _warn_delimiter_mismatch(path: str, delimiter: str, col_count: int) -> None:
+    """Emit a UserWarning when the parsed result has one column and the raw
+    file appears to contain a different candidate delimiter outside quoted
+    fields in the first two logical CSV records.
+
+    Quote state is preserved across physical newlines, so a multiline quoted
+    field such as ``"Alice\\nSmith";30`` is correctly handled: the semicolon
+    is detected as outside quotes even though it sits on the second physical
+    line of the file.
+
+    Only fires when the candidate delimiter appears outside quotes in *both*
+    the header record and the first data record, which rules out column
+    headers that coincidentally contain the character.
+
+    This is a best-effort hint — it never raises, so intentional single-column
+    reads are never broken.
+    """
+    if col_count != 1:
+        return
+
+    candidates = _MISMATCH_PROBE_DELIMITERS - {delimiter}
+
+    try:
+        records = _read_logical_records(path, max_records=2)
+        if len(records) < 2:
+            # Header-only or empty file — no data record to probe.
+            return
+
+        header_record, data_record = records[0], records[1]
+
+        for candidate in candidates:
+            if (
+                _count_unquoted_in_record(header_record, candidate) >= 1
+                and _count_unquoted_in_record(data_record, candidate) >= 1
+            ):
+                display = repr(candidate).strip("'")
+                used_display = repr(delimiter).strip("'")
+                warnings.warn(
+                    f"Parsed as a single column — possible delimiter mismatch. "
+                    f"The file appears to contain {display!r} characters but "
+                    f"delimiter={used_display!r} was used. "
+                    f"Try ar.read_csv(path, delimiter={display!r}) or "
+                    f"ar.sniff_delimiter(path) to auto-detect.",
+                    UserWarning,
+                    stacklevel=4,
+                )
+                return
+    except OSError:
+        pass  # best-effort; never mask the original parse result
+
+
 def read_csv(
     path: str | os.PathLike[str] | io.TextIOBase,
     *,
@@ -856,13 +1049,29 @@ def read_csv(
             encoding_errors=encoding_errors,
             delimiter=delimiter,
         ) as native_csv_path:
-            cpp_frame, bad_rows = reader.read(native_csv_path, on_bad_lines)
+            try:
+                cpp_frame, bad_rows = reader.read(native_csv_path, on_bad_lines)
+            except CsvReadError:
+                raise
+            except (ValueError, TypeError):
+                raise
+            except RuntimeError as e:
+                raise _enrich_csv_runtime_error(
+                    e, native_path, encoding, delimiter
+                ) from None
 
-        # on_bad_lines == "error" will raise RuntimeError then converted to CsvReadError as before
         if on_bad_lines == "warn" and bad_rows:
             _warn_bad_rows(bad_rows)
 
-        return ArFrame(cpp_frame)
+        frame = ArFrame(cpp_frame)
+
+        # Case 2: Delimiter mismatch — check only when usecols was not restricted
+        # (usecols can legitimately produce 1 column) and has_header is True
+        # so we can peek at the data line.
+        if usecols is None and has_header:
+            _warn_delimiter_mismatch(native_path, delimiter, frame.shape[1])
+
+        return frame
 
     except (ValueError, TypeError):
         raise
@@ -1441,6 +1650,9 @@ def scan_csv(
         raise
     except CsvReadError:
         raise
+    except RuntimeError as e:
+        assert delimiter is not None
+        raise _enrich_csv_runtime_error(e, native_path, encoding, delimiter) from None
     except Exception as e:
         raise CsvReadError(str(e)) from None
     finally:
@@ -1586,6 +1798,11 @@ def read_jsonl(
         Path to the ``.jsonl`` or ``.ndjson`` file.
     encoding : str, default ``"utf-8"``
         File encoding.
+    encoding_errors : str, default ``"strict"``
+        How encoding errors are handled while decoding file bytes.
+        One of ``"strict"`` (raise on invalid bytes), ``"replace"``
+        (substitute the Unicode replacement character), or ``"ignore"``
+        (drop invalid bytes silently).
     nrows : int, optional
         Maximum number of data rows to read.  If ``None``, all rows are read.
 
@@ -1597,8 +1814,9 @@ def read_jsonl(
     Raises
     ------
     ValueError
-        If the file extension is not ``.jsonl`` or ``.ndjson``, or if
-        ``nrows`` is not a non-negative integer.
+        If the file extension is not ``.jsonl`` or ``.ndjson``, if
+        ``nrows`` is not a non-negative integer, or if ``encoding_errors``
+        is not one of ``"strict"``, ``"replace"``, or ``"ignore"``.
     JsonlReadError
         If the file is empty (no data rows), or if a line contains invalid
         JSON or unsupported nested values. The error message includes the
@@ -1608,6 +1826,7 @@ def read_jsonl(
     --------
     >>> frame = ar.read_jsonl("events.jsonl")
     >>> frame = ar.read_jsonl("data.ndjson", nrows=1000)
+    >>> frame = ar.read_jsonl("data.jsonl", encoding_errors="replace")
     """
     _validate_jsonl_encoding(encoding)
 
@@ -1676,7 +1895,8 @@ def read_jsonl_chunked(
     ------
     ValueError
         If the file extension is not ``.jsonl`` or ``.ndjson``, if
-        ``chunksize`` is not positive, or if ``nrows`` is not non-negative.
+        ``chunksize`` is not positive, or if ``nrows`` is not non-negative, or if
+        ``encoding_errors`` is not one of ``"strict"``, ``"replace"``, or ``"ignore"``.
     JsonlReadError
         If the file is empty (no data rows), or if a line contains invalid
         JSON or unsupported nested values. The error message includes the
@@ -2131,3 +2351,130 @@ def write_parquet(
         kwargs["row_group_size"] = row_group_size
 
     df.to_parquet(path, **kwargs)
+
+
+def write_json(
+    frame: ArFrame,
+    path: str | os.PathLike[str],
+    *,
+    orient: str = "records",
+    indent: int | None = None,
+) -> None:
+    """Write an ArFrame to a JSON file.
+
+    This function exports the frame's data to JSON without pandas conversion.
+
+    Parameters
+    ----------
+    frame : ArFrame
+        The data frame to write.
+    path : str or path-like
+        Destination file path. Must end with ``.json``.
+    orient : str, default ``"records"``
+        The JSON orientation format to use. Supported values are
+        ``"records"``, ``"list"``, and ``"split"``.
+    indent : int, optional
+        If specified, the JSON output will be pretty-printed with that
+        indentation level. If ``None`` (the default), the JSON is written
+        compactly.
+
+    Raises
+    ------
+    TypeError
+        If the input frame is not an ArFrame, or path is not valid.
+    ValueError
+        If the file extension is not ``.json``, or if the orientation
+        is unsupported.
+
+    Examples
+    --------
+    >>> ar.write_json(frame, "output.json")
+    >>> ar.write_json(frame, "output.json", indent=4)
+    >>> ar.write_json(frame, "output.json", orient="list")
+    """
+    if not isinstance(frame, ArFrame):
+        raise TypeError("frame must be an ArFrame")
+
+    if not isinstance(path, (str, bytes, os.PathLike)):
+        raise TypeError(
+            f"path must be a string, bytes, or os.PathLike object, got {type(path).__name__!r}"
+        )
+
+    path = os.fsdecode(os.fspath(path))
+    path_lower = path.lower()
+    if not path_lower.endswith(".json"):
+        raise ValueError(
+            f"Unsupported file format: {path}. " "write_json only supports .json files."
+        )
+
+    valid_orients = ("records", "list", "split")
+    if orient not in valid_orients:
+        raise ValueError(
+            f"Unsupported orient: {orient!r}. " f"Valid options are: {valid_orients}"
+        )
+
+    if indent is not None:
+        if isinstance(indent, bool) or not isinstance(indent, int):
+            raise TypeError("indent must be an integer or None")
+        if indent < 0:
+            raise ValueError("indent must be a non-negative integer")
+
+    data = frame.to_dict(orient=orient)
+
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=indent)
+
+
+def write_jsonl(
+    frame: ArFrame,
+    path: str | os.PathLike[str],
+    *,
+    encoding: str = "utf-8",
+    encoding_errors: str = "strict",
+) -> None:
+    """Write an ArFrame to a JSONL file."""
+    if not isinstance(frame, ArFrame):
+        raise TypeError("frame must be an ArFrame")
+    if not isinstance(path, (str, bytes, os.PathLike)):
+        raise TypeError("path must be a string, bytes, or os.PathLike object")
+    path = os.fsdecode(os.fspath(path))
+    if not path.lower().endswith((".jsonl", ".ndjson")):
+        raise ValueError("path must end with .jsonl or .ndjson")
+    _validate_jsonl_encoding(encoding)
+    _validate_encoding_errors(encoding_errors)
+    try:
+        records = frame.to_dict(orient="records")
+    except Exception as exc:
+        raise RuntimeError(
+            f"write_jsonl: failed to convert frame to records: {exc}"
+        ) from exc
+
+    try:
+        with open(
+            path,
+            "w",
+            encoding=encoding,
+            errors=encoding_errors,
+            newline="",
+        ) as dst:
+            for row in records:
+                try:
+                    dst.write(
+                        json.dumps(
+                            row,
+                            ensure_ascii=False,
+                            separators=(",", ":"),
+                            allow_nan=False,
+                        )
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"write_jsonl: row contains a value that cannot be serialized as JSON: {exc}"
+                    ) from exc
+                dst.write("\n")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            f"write_jsonl: character cannot be encoded in {encoding!r}: {exc}"
+        ) from exc
+    except OSError as exc:
+        raise RuntimeError(str(exc)) from exc

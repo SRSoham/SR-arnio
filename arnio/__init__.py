@@ -23,6 +23,7 @@ from .cleaning import (
     fill_nulls,
     filter_rows,
     find_fuzzy_duplicates,
+    hash_columns,
     keep_rows_with_nulls,
     normalize_case,
     normalize_minmax,
@@ -42,12 +43,21 @@ from .cleaning import (
     validate_columns_exist,
     winsorize_outliers,
 )
-from .convert import from_dict, from_pandas, from_polars, to_arrow, to_pandas, to_polars
+from .convert import (
+    from_arrow,
+    from_dict,
+    from_pandas,
+    from_polars,
+    to_arrow,
+    to_pandas,
+    to_polars,
+)
 from .encode_categorical import encode_categorical
 from .exceptions import (
     ArnioError,
     CsvReadError,
     JsonlReadError,
+    PipelineSerializationError,
     PipelineStepError,
     RemoteReadError,
     SchemaValidationError,
@@ -65,6 +75,8 @@ from .io import (
     scan_csv,
     sniff_delimiter,
     write_csv,
+    write_json,
+    write_jsonl,
     write_parquet,
 )
 from .pipeline import (
@@ -72,9 +84,11 @@ from .pipeline import (
     PipelineContext,
     get_builtin_step_signatures,
     list_steps,
+    load_pipeline,
     pipeline,
     register_step,
     reset_steps,
+    save_pipeline,
     unregister_step,
 )
 from .quality import (
@@ -83,17 +97,20 @@ from .quality import (
     CleanStepRecord,
     ColumnProfile,
     DataQualityReport,
+    DriftReport,
     ProfileComparison,
     QualityGateIssue,
     QualityGateResult,
     auto_clean,
     check_quality_gates,
     compare_profiles,
+    detect_drift,
     profile,
     suggest_cleaning,
 )
 from .schema import (
     URL,
+    UUID,
     Bool,
     CountryCode,
     CurrencyCode,
@@ -104,7 +121,9 @@ from .schema import (
     Field,
     Float64,
     Int64,
+    IPv4,
     LanguageCode,
+    MACAddress,
     PhoneNumber,
     Regex,
     Schema,
@@ -117,6 +136,7 @@ from .schema import (
     diff_schema,
     register_validator,
     validate,
+    validate_chunked,
 )
 from .schema_export import schema_from_yaml, schema_to_dict, schema_to_yaml
 
@@ -132,6 +152,8 @@ __all__ = [
     "read_jsonl",
     "read_jsonl_chunked",
     "write_csv",
+    "write_json",
+    "write_jsonl",
     "read_parquet",
     "write_parquet",
     "scan_csv",
@@ -159,6 +181,7 @@ __all__ = [
     "rename_columns_matching",
     "drop_columns_matching",
     "strip_whitespace",
+    "hash_columns",
     "parse_bool_strings",
     "normalize_case",
     "rename_columns",
@@ -178,6 +201,7 @@ __all__ = [
     "to_polars",
     "from_pandas",
     "from_polars",
+    "from_arrow",
     "from_records",
     "from_dict",
     # Integrations
@@ -195,11 +219,13 @@ __all__ = [
     # Data quality
     "profile",
     "compare_profiles",
+    "detect_drift",
     "check_quality_gates",
     "suggest_cleaning",
     "auto_clean",
     "ColumnProfile",
     "DataQualityReport",
+    "DriftReport",
     "CleanStepRecord",
     "CleanExplanation",
     "ProfileComparison",
@@ -213,6 +239,7 @@ __all__ = [
     "ValidationIssue",
     "ValidationResult",
     "validate",
+    "validate_chunked",
     "diff_schema",
     "Int64",
     "Float64",
@@ -243,5 +270,11 @@ __all__ = [
     "schema_from_yaml",
     "schema_to_dict",
     "schema_to_yaml",
+    "save_pipeline",
+    "load_pipeline",
+    "PipelineSerializationError",
     "encode_categorical",
+    "UUID",
+    "IPv4",
+    "MACAddress",
 ]
